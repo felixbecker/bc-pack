@@ -194,7 +194,7 @@ const PLUGIN_VERSION = "1.0.0";
  * matched to the build that produced it — without this it was unclear whether
  * a report came from the current code or a stale installed copy.
  */
-const DIAGNOSTICS_VERSION = 5;
+const DIAGNOSTICS_VERSION = 6;
 
 /**
  * Collects host application info for diagnostics logs. Wrapped defensively
@@ -914,16 +914,38 @@ async function computeAverageValue(param, fallbackTime) {
  * Builds the write plan for one parameter: which value to pin it to, and at
  * which time (the latter only matters in keyframe mode).
  */
-async function planParam(component, paramIndex, trackItem, sequence, timing) {
+async function planParam(component, paramIndex, trackItem, sequence, timing, sourceIndex) {
     const param = component.getParam(paramIndex);
     if (!param) return null;
 
-    const referenceTime = await resolveReferenceTime(param, trackItem, sequence, timing);
+    /*
+     * Where to READ the reference value from.
+     *
+     * Premiere only transfers the generated path onto the editable parameter
+     * when the checkbox is toggled in the UI; setting it through the API does
+     * not trigger that side effect, so the editable parameter can stay empty
+     * and would yield the neutral default. The raw generated path carries the
+     * keyframes regardless, so it serves as the source of truth when the
+     * target parameter has none. Written is always the target parameter.
+     */
+    let readParam = param;
+    let readFrom = "target";
+    if (typeof sourceIndex === "number" && sourceIndex >= 0 && sourceIndex !== paramIndex) {
+        if (getKeyframeTimes(param).length === 0) {
+            const source = component.getParam(sourceIndex);
+            if (source && getKeyframeTimes(source).length > 0) {
+                readParam = source;
+                readFrom = "generatedPath";
+            }
+        }
+    }
+
+    const referenceTime = await resolveReferenceTime(readParam, trackItem, sequence, timing);
 
     const rawValue =
         timing === TIMING.AVERAGE
-            ? await computeAverageValue(param, referenceTime)
-            : await param.getValueAtTime(referenceTime);
+            ? await computeAverageValue(readParam, referenceTime)
+            : await readParam.getValueAtTime(referenceTime);
 
     // The average path already returns normalized data; a direct read does not.
     const value =
@@ -941,7 +963,7 @@ async function planParam(component, paramIndex, trackItem, sequence, timing) {
         );
     }
 
-    const keyTimes = getKeyframeTimes(param);
+    const keyTimes = getKeyframeTimes(readParam);
 
     /*
      * Write bounds for keyframe mode.
@@ -967,6 +989,8 @@ async function planParam(component, paramIndex, trackItem, sequence, timing) {
     return {
         paramIndex: paramIndex,
         paramName: param.displayName,
+        readFrom: readFrom,
+        readParamName: readParam.displayName,
         value: value,
         referenceTime: referenceTime,
         writeStart: writeStart,
@@ -1067,9 +1091,13 @@ async function discoverClip(trackItem, options) {
             overrideActive = null;
         }
 
+        // Soft lookup: used only as a value source, never written.
+        const generatedIndex = findParamIndex(component, GENERATED_PATH_NAMES, null);
+
         return {
             status: "discovered",
             clipName: clipName,
+            generatedPathIndex: generatedIndex,
             trackItem: trackItem,
             chain: found.chain,
             componentIndex: found.index,
@@ -1111,7 +1139,10 @@ async function planClipValues(discovery, sequence, options) {
                 discovery.paramIndexes[i],
                 discovery.trackItem,
                 sequence,
-                options.timing
+                options.timing,
+                // Only the first target (position) has a generated-path
+                // counterpart to fall back to.
+                i === 0 ? discovery.generatedPathIndex : -1
             )
         );
     }
@@ -1151,7 +1182,8 @@ async function countGeneratedKeyframes(plan) {
  * component chain each attempt. Returns false on timeout.
  */
 async function waitForKeyframes(plan, expected) {
-    const ATTEMPTS = 25;
+    // Short: a timeout is a normal outcome, not a failure.
+    const ATTEMPTS = 8;
     const INTERVAL_MS = 120;
 
     for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
@@ -1492,25 +1524,16 @@ async function runSmoothAutoFrame(rawOptions) {
              * The raw generated path tells us how many to expect; if it has
              * none either, there is nothing to wait for.
              */
+            /*
+             * Give Premiere a brief chance to transfer the generated path onto
+             * the editable parameter. It only reliably does so when the
+             * checkbox is toggled in the UI, so a timeout here is expected and
+             * NOT an error: planParam then reads the reference value straight
+             * from the generated path instead.
+             */
             const expected = await countGeneratedKeyframes(plan);
             if (expected > 0) {
-                const appeared = await waitForKeyframes(plan, expected);
-                if (!appeared) {
-                    report.errors++;
-                    report.results.push({
-                        clipName: plan.clipName,
-                        status: "error",
-                        reason:
-                            "Nach dem Aktivieren der Checkbox hat Premiere die " +
-                            expected +
-                            " Keyframes des erzeugten Pfads nicht auf den " +
-                            "bearbeitbaren Parameter übertragen. Es wurde nichts " +
-                            "geschrieben, um nicht den neutralen Standardwert " +
-                            "festzuschreiben.",
-                        params: plan.params
-                    });
-                    continue;
-                }
+                plan.keyframesTransferred = await waitForKeyframes(plan, expected);
             }
 
             // Now that the override is active AND the keyframes are present.
@@ -1771,6 +1794,8 @@ async function runSmoothAutoFrame(rawOptions) {
                 changes.push({
                     param: target.paramName,
                     value: describeValue(target.value),
+                    readFrom: target.readFrom,
+                    readParam: target.readParamName,
                     keyframesBefore: target.keyframeCount,
                     keyframesAfter: keyframesAfter,
                     timeVaryingAfter: stillVarying

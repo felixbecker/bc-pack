@@ -579,6 +579,39 @@ function reset() { log.length = 0; }
         assert.ok(r.results[0].keyframeWaitAttempts >= 1, "keine Wartezyklen protokolliert");
     });
 
+    await t("Ohne Keyframe-Übertragung wird der erzeugte Pfad als Quelle genutzt", async () => {
+        /*
+         * Realfall Premiere 26.3.2: beim programmatischen Setzen der Checkbox
+         * überträgt Premiere den erzeugten Pfad NICHT auf "Position anpassen".
+         * Der Referenzwert muss dann aus "Generated Keyframes" kommen —
+         * geschrieben wird weiterhin "Position anpassen".
+         */
+        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
+        // Ziel bleibt dauerhaft leer (keine Übertragung).
+        const adjust = new MockParam("Position anpassen", [], new PointF(0.5, 0.5), false);
+        const generated = new MockParam("Generated Keyframes", [
+            { t: S(1), v: new PointF(0.6889, 0.5) },
+            { t: S(2), v: new PointF(0.80, 0.5) }
+        ], null, true);
+        const applied = new MockParam("Position", [], new PointF(0.6889, 0.5), false);
+
+        makeScenario([override, applied, adjust, generated], { clipName: "notransfer.mov" });
+
+        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
+        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
+        assert.strictEqual(r.processed, 1);
+
+        const change = r.results[0].changes[0];
+        assert.strictEqual(change.param, "Position anpassen", "falsches Ziel: " + change.param);
+        assert.strictEqual(change.readFrom, "generatedPath", "Quelle nicht protokolliert: " + change.readFrom);
+        assert.strictEqual(change.readParam, "Generated Keyframes");
+        assert.strictEqual(change.keyframesBefore, 2, "Keyframe-Zahl der Quelle fehlt");
+        // Der echte erste Keyframe-Wert, nicht der neutrale 0.5.
+        assert.ok(Math.abs(adjust._static.x - 0.6889) < 1e-9,
+            "neutraler Wert geschrieben: " + adjust._static.x);
+        assert.strictEqual(generated._keys.length, 2, "Quelle wurde verändert");
+    });
+
     await t("Referenz 'end' nimmt den LETZTEN Keyframe-Wert", async () => {
         const s = buildScenario();
         await runSmoothAutoFrame({ timing: "end", dryRun: false });
