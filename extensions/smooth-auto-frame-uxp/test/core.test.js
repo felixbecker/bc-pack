@@ -463,6 +463,51 @@ function reset() { log.length = 0; }
             "falscher Referenzwert -> zu frueh gelesen: " + position._static.x);
     });
 
+    await t("Checkbox ohne Anzeigenamen wird per bekanntem Index aufgelöst", async () => {
+        /*
+         * Reale Lage in AE.ADBE AEFilterAutoFramer (Premiere 26.3.2, de_DE):
+         * die Override-Checkbox liegt auf Index 8 und hat den Anzeigenamen "".
+         * Index 0 (" ") und Index 4 ("Uniform Scale") sind ebenfalls Booleans,
+         * duerfen aber NICHT getroffen werden.
+         */
+        const p = [];
+        p[0] = new MockParam(" ", [], false, false);
+        p[1] = new MockParam("Motion-Tracking", [], 1, false);
+        p[2] = new MockParam("Position", [{ t: S(1), v: new PointF(0.68, 0.5) }], null, true);
+        p[3] = new MockParam("Scale (Merged)", [], 100, false);
+        p[4] = new MockParam("Uniform Scale", [], true, false);
+        p[5] = new MockParam("Anchor Point", [], new PointF(0.5, 0.5), false);
+        p[6] = new MockParam("Position anpassen", [{ t: S(1), v: new PointF(0.42, 0.5) }], null, true);
+        p[7] = new MockParam("Generated Keyframes", [{ t: S(1), v: new PointF(0.5, 0.5) }], null, true);
+        p[8] = new MockParam("", [], false, false);   // <- die Checkbox
+        p[9] = new MockParam("Hash arb data", [], null, false);
+        p[10] = new MockParam("Reframing für Versatz", [], new PointF(0, 0), false);
+        p[11] = new MockParam("Reframing für Skalierung", [], 100, false);
+        p[12] = new MockParam("Scale (Auto Generated)", [], 100, false);
+        p[13] = new MockParam("Reframing für Drehung", [], 0, false);
+
+        makeScenario(p, {
+            matchName: "AE.ADBE AEFilterAutoFramer",
+            displayName: "Auto Reframe",
+            clipName: "real_layout.mov"
+        });
+
+        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
+        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
+        assert.strictEqual(r.processed, 1);
+        assert.strictEqual(p[8]._static, true, "Checkbox auf Index 8 nicht gesetzt");
+        assert.strictEqual(p[0]._static, false, "falsche Checkbox (Index 0) gesetzt");
+        assert.strictEqual(p[4]._static, true, "Uniform Scale veraendert");
+        // Bearbeitet werden muss "Position anpassen" (Index 6), nicht Index 2.
+        assert.strictEqual(r.results[0].changes[0].param, "Position anpassen",
+            "falscher Parameter: " + r.results[0].changes[0].param);
+        assert.strictEqual(p[6]._keys.length, 0, "Index 6 nicht bereinigt");
+        assert.strictEqual(p[2]._keys.length, 1, "Index 2 wurde fälschlich angefasst");
+        assert.strictEqual(r.results[0].overrideResolvedBy, "index",
+            "Auflösungsart nicht protokolliert");
+        assert.ok(r.results[0].paramsAfter, "paramsAfter fehlt");
+    });
+
     await t("Referenz 'end' nimmt den LETZTEN Keyframe-Wert", async () => {
         const s = buildScenario();
         await runSmoothAutoFrame({ timing: "end", dryRun: false });

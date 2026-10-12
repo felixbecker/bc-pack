@@ -131,6 +131,32 @@ const OVERRIDE_PAN_FRAGMENTS = ["überschreib", "uberschreib", "override", "over
  */
 const AUTO_REFRAME_MATCHNAME = "AE.ADBE AEFilterAutoFramer";
 
+/*
+ * Known parameter indexes per effect matchName.
+ *
+ * Needed because some parameters have NO usable displayName. Confirmed by
+ * diffing diagnostic dumps from Premiere 26.3.2 (de_DE) with the override
+ * checkbox off and on: index 8 — whose displayName is the empty string — is
+ * the only parameter that flipped false -> true. Index 0 (a single space) and
+ * index 4 ("Uniform Scale") stayed unchanged, which rules them out.
+ *
+ * An index is only ever used when the name lookup fails, and the parameter
+ * found there is still type-validated. A layout shift in a future Premiere
+ * version therefore produces a clean error rather than a wrong write.
+ */
+const KNOWN_PARAM_LAYOUTS = {
+    "ae.adbe aefilterautoframer": {
+        overridePan: 8
+    }
+};
+
+function knownParamIndex(matchName, key) {
+    const layout = KNOWN_PARAM_LAYOUTS[normalizeName(matchName)];
+    if (!layout) return -1;
+    const index = layout[key];
+    return typeof index === "number" ? index : -1;
+}
+
 /* "Position anpassen" / "Adjust Position" must outrank the bare "Position". */
 const POSITION_PARAM_NAMES = ["adjust position", "position anpassen", "position"];
 const POSITION_FRAGMENTS = ["position anpassen", "adjust position", "position"];
@@ -151,7 +177,7 @@ const PLUGIN_VERSION = "1.0.0";
  * matched to the build that produced it — without this it was unclear whether
  * a report came from the current code or a stale installed copy.
  */
-const DIAGNOSTICS_VERSION = 3;
+const DIAGNOSTICS_VERSION = 4;
 
 /**
  * Collects host application info for diagnostics logs. Wrapped defensively
@@ -546,6 +572,7 @@ async function findAutoReframeComponent(trackItem) {
                 chain: chain,
                 index: i,
                 component: component,
+                matchName: matchName,
                 components: components
             };
         }
@@ -614,9 +641,20 @@ async function resolveRequiredParam(
     candidateNames,
     fragments,
     paramDump,
-    expectBoolean
+    expectBoolean,
+    fallbackIndex
 ) {
-    const index = findParamIndex(component, candidateNames, fragments);
+    let index = findParamIndex(component, candidateNames, fragments);
+    let resolvedBy = "name";
+
+    // Some parameters carry no usable displayName (the override checkbox is
+    // literally named ""), so a known index is the only way to reach them.
+    if (index < 0 && typeof fallbackIndex === "number" && fallbackIndex >= 0) {
+        if (fallbackIndex < component.getParamCount()) {
+            index = fallbackIndex;
+            resolvedBy = "index";
+        }
+    }
 
     if (index < 0) {
         let hint = "";
@@ -683,7 +721,8 @@ async function resolveRequiredParam(
                     label +
                     '" erkannte Parameter "' +
                     param.displayName +
-                    '" liefert keinen Wahrheitswert, sondern ' +
+                    '" (aufgelöst per ' + resolvedBy +
+                    ') liefert keinen Wahrheitswert, sondern ' +
                     safeJson(probe) +
                     ". Vermutlich wurde der falsche Parameter getroffen. " +
                     "Vorhandene Parameter: " +
@@ -692,7 +731,12 @@ async function resolveRequiredParam(
         }
     }
 
-    return { index: index, param: param, name: param.displayName };
+    return {
+        index: index,
+        param: param,
+        name: param.displayName,
+        resolvedBy: resolvedBy
+    };
 }
 
 /** TickTime zero, used for probing a parameter's value. */
@@ -967,13 +1011,19 @@ async function discoverClip(trackItem, options) {
         const position = await resolveRequiredParam(
             component, "Position", POSITION_PARAM_NAMES, POSITION_FRAGMENTS, paramDump
         );
+        /*
+         * The override checkbox has an empty displayName in this effect, so
+         * the name lookup is expected to fail and the known index is used.
+         * The parameter found there is still validated as a boolean.
+         */
         const override = await resolveRequiredParam(
             component,
             "Erzeugten Pfad überschreiben",
             OVERRIDE_PAN_PARAM_NAMES,
             OVERRIDE_PAN_FRAGMENTS,
             paramDump,
-            true
+            true,
+            knownParamIndex(found.matchName, "overridePan")
         );
 
         const extras = [];
@@ -1007,6 +1057,7 @@ async function discoverClip(trackItem, options) {
             chain: found.chain,
             componentIndex: found.index,
             overridePanIndex: override.index,
+            overrideResolvedBy: override.resolvedBy,
             overrideActiveBefore: overrideActive,
             paramIndexes: [position.index].concat(extras.map((e) => e.index)),
             params: paramDump,
@@ -1631,6 +1682,21 @@ async function runSmoothAutoFrame(rawOptions) {
             problems.push("Nachprüfung fehlgeschlagen: " + describeError(error));
         }
 
+        /*
+         * Full post-run parameter state. Auto Reframe exposes several related
+         * position parameters ("Position", "Position anpassen", "Generated
+         * Keyframes"); only one is written, and this records whether the others
+         * settled as a consequence. Without it there is no way to tell whether
+         * freezing the right parameter actually stopped the movement.
+         */
+        let paramsAfter = null;
+        try {
+            const component = plan.chain.getComponentAtIndex(plan.componentIndex);
+            if (component) paramsAfter = await describeComponentParams(component);
+        } catch {
+            paramsAfter = null;
+        }
+
         if (problems.length) {
             report.errors++;
             report.results.push({
@@ -1640,9 +1706,10 @@ async function runSmoothAutoFrame(rawOptions) {
                     "Schreiben wurde nicht übernommen. " +
                     problems.join(" ") +
                     " Parameter des Effekts: " +
-                    safeJson(plan.params),
+                    safeJson(paramsAfter || plan.params),
                 changes: changes,
-                params: plan.params
+                params: plan.params,
+                paramsAfter: paramsAfter
             });
             continue;
         }
@@ -1654,7 +1721,9 @@ async function runSmoothAutoFrame(rawOptions) {
             reason: options.keyframeMode
                 ? "Auf Hold-Keyframes reduziert und nachgeprüft."
                 : "Auf konstanten Wert fixiert und nachgeprüft (keine Keyframes mehr).",
-            changes: changes
+            changes: changes,
+            overrideResolvedBy: plan.overrideResolvedBy,
+            paramsAfter: paramsAfter
         });
     }
 
