@@ -86,6 +86,32 @@ const ROTATION_PARAM_NAMES = ["adjust rotation", "rotation", "drehung"];
 /** Temporal interpolation mode: hold (step) — see Premiere scripting enum. */
 const INTERP_MODE_HOLD = 4;
 
+const PLUGIN_VERSION = "1.0.0";
+
+/**
+ * Collects host application info for diagnostics logs. Wrapped defensively
+ * because the exact shape of the UXP host object is not guaranteed across
+ * versions, and a missing field must never break a run.
+ */
+function describeHost() {
+    const info = {};
+    try {
+        const uxp = require("uxp");
+        if (uxp && uxp.host) {
+            if (uxp.host.name) info.app = String(uxp.host.name);
+            if (uxp.host.version) info.appVersion = String(uxp.host.version);
+            if (uxp.host.uiLocale) info.uiLocale = String(uxp.host.uiLocale);
+        }
+        if (uxp && uxp.versions) {
+            if (uxp.versions.uxp) info.uxp = String(uxp.versions.uxp);
+            if (uxp.versions.plugin) info.plugin = String(uxp.versions.plugin);
+        }
+    } catch {
+        info.note = "Host-Infos nicht verfügbar";
+    }
+    return info;
+}
+
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -106,7 +132,246 @@ function containsFragment(value, fragments) {
     return fragments.some((fragment) => normalized.indexOf(fragment) !== -1);
 }
 
-/** True for PointF-like values (UXP returns PointF for point parameters). */
+/**
+ * Coerces a value to a finite number, accepting numeric strings.
+ * Returns null when that is not possible.
+ */
+function toFiniteNumber(candidate) {
+    if (typeof candidate === "number") {
+        return isFinite(candidate) ? candidate : null;
+    }
+    if (typeof candidate === "string" && candidate.trim() !== "") {
+        const parsed = Number(candidate);
+        return isFinite(parsed) ? parsed : null;
+    }
+    return null;
+}
+
+/** True for anything that carries two usable numeric components. */
+function looksLikePoint(candidate) {
+    if (candidate === null || typeof candidate !== "object") return false;
+    if (Array.isArray(candidate)) {
+        return (
+            candidate.length >= 2 &&
+            toFiniteNumber(candidate[0]) !== null &&
+            toFiniteNumber(candidate[1]) !== null
+        );
+    }
+    return toFiniteNumber(candidate.x) !== null && toFiniteNumber(candidate.y) !== null;
+}
+
+function readPoint(candidate) {
+    if (Array.isArray(candidate)) {
+        return { x: toFiniteNumber(candidate[0]), y: toFiniteNumber(candidate[1]) };
+    }
+    return { x: toFiniteNumber(candidate.x), y: toFiniteNumber(candidate.y) };
+}
+
+const MAX_UNWRAP_DEPTH = 4;
+
+/**
+ * Premiere does not always hand back a bare value. Depending on version and
+ * parameter type it can return a wrapper around it — the UXP reference even
+ * types `Keyframe.value` as `{value: ...}`, i.e. the payload sits one level
+ * deeper. This peels off such layers until an inspectable value appears.
+ */
+function unwrapValue(raw) {
+    let current = raw;
+    for (let depth = 0; depth < MAX_UNWRAP_DEPTH; depth++) {
+        if (current === null || typeof current !== "object") return current;
+        if (Array.isArray(current) || looksLikePoint(current)) return current;
+
+        let next;
+        try {
+            next = current.value;
+        } catch {
+            return current;
+        }
+        if (next === undefined || next === current) return current;
+        current = next;
+    }
+    return current;
+}
+
+/**
+ * Normalizes whatever Premiere returned into plain JS:
+ * a number, a boolean, or `{x, y}`. Returns null if the value is unusable,
+ * which callers must treat as "do not write anything".
+ */
+function normalizeReadValue(raw) {
+    const value = unwrapValue(raw);
+
+    if (typeof value === "boolean") return value;
+
+    if (typeof value !== "object" || value === null) {
+        const numeric = toFiniteNumber(value);
+        return numeric === null ? null : numeric;
+    }
+
+    if (looksLikePoint(value)) return readPoint(value);
+
+    return null;
+}
+
+const MAX_JSON_DEPTH = 5;
+const MAX_JSON_ENTRIES = 24;
+
+/**
+ * Collects the readable property names of a value.
+ *
+ * `for...in` alone is not enough for Premiere's host objects: accessors
+ * declared on a class prototype are non-enumerable, so a PointF-like object
+ * would appear to have no properties at all. This therefore also walks the
+ * prototype chain via getOwnPropertyNames.
+ */
+function collectReadableKeys(value) {
+    const keys = [];
+    const seen = Object.create(null);
+
+    function push(key) {
+        if (key === "constructor" || seen[key]) return;
+        seen[key] = true;
+        keys.push(key);
+    }
+
+    try {
+        for (const key in value) push(key);
+    } catch {
+        /* host objects may refuse enumeration */
+    }
+
+    let current = value;
+    let depth = 0;
+    while (current && current !== Object.prototype && depth < 6) {
+        try {
+            const names = Object.getOwnPropertyNames(current);
+            for (let i = 0; i < names.length; i++) push(names[i]);
+        } catch {
+            break;
+        }
+        try {
+            current = Object.getPrototypeOf(current);
+        } catch {
+            break;
+        }
+        depth++;
+    }
+
+    return keys;
+}
+
+/**
+ * Serializes a value for diagnostics.
+ *
+ * Plain JSON.stringify is not enough for Premiere's host objects: their data
+ * usually sits behind non-enumerable prototype getters, which JSON.stringify
+ * skips — a PointF would come out as "{}". This reads the properties found by
+ * collectReadableKeys instead, bounded in depth and width, and never throws.
+ */
+function safeJson(value, depth) {
+    const level = depth || 0;
+
+    if (value === null) return "null";
+    if (value === undefined) return "undefined";
+
+    const type = typeof value;
+    if (type === "number") {
+        return isFinite(value) ? String(value) : '"' + String(value) + '"';
+    }
+    if (type === "boolean") return String(value);
+    if (type === "string") return JSON.stringify(value);
+    if (type === "function") return '"[Function]"';
+    if (type !== "object") return '"' + String(value) + '"';
+
+    if (level >= MAX_JSON_DEPTH) return '"[zu tief verschachtelt]"';
+
+    if (Array.isArray(value)) {
+        const items = [];
+        for (let i = 0; i < value.length && i < MAX_JSON_ENTRIES; i++) {
+            items.push(safeJson(value[i], level + 1));
+        }
+        if (value.length > MAX_JSON_ENTRIES) items.push('"…"');
+        return "[" + items.join(",") + "]";
+    }
+
+    const keys = collectReadableKeys(value);
+    const parts = [];
+    for (let i = 0; i < keys.length; i++) {
+        if (parts.length >= MAX_JSON_ENTRIES) {
+            parts.push('"…":"abgeschnitten"');
+            break;
+        }
+        const key = keys[i];
+        let member;
+        try {
+            member = value[key];
+        } catch {
+            member = "[nicht lesbar]";
+        }
+        // Methods add noise without diagnostic value.
+        if (typeof member === "function") continue;
+        parts.push(JSON.stringify(key) + ":" + safeJson(member, level + 1));
+    }
+
+    return "{" + parts.join(",") + "}";
+}
+
+/**
+ * Builds a human-readable description of an unexpected value, for error
+ * messages. Plain String(value) yields "[object Object]", which tells nobody
+ * anything — this surfaces constructor name, keys and probe fields instead.
+ */
+function describeShape(raw) {
+    if (raw === null) return "null";
+    if (raw === undefined) return "undefined";
+
+    const type = typeof raw;
+    if (type !== "object") return type + " " + String(raw);
+
+    const parts = [];
+    try {
+        if (raw.constructor && raw.constructor.name) {
+            parts.push("typ=" + raw.constructor.name);
+        }
+    } catch {
+        /* host objects may not expose constructor */
+    }
+
+    if (Array.isArray(raw)) {
+        parts.push("array(" + raw.length + ")");
+    }
+
+    const keys = [];
+    const found = collectReadableKeys(raw);
+    for (let i = 0; i < found.length && keys.length < 14; i++) {
+        let member;
+        try {
+            member = raw[found[i]];
+        } catch {
+            member = undefined;
+        }
+        if (typeof member === "function") continue;
+        keys.push(found[i]);
+    }
+    if (keys.length) parts.push("keys=[" + keys.join(",") + "]");
+
+    const probes = ["value", "x", "y", "horizontal", "vertical", "width", "height"];
+    for (let i = 0; i < probes.length; i++) {
+        const probe = probes[i];
+        try {
+            const probed = raw[probe];
+            if (probed !== undefined) {
+                parts.push(probe + ":" + typeof probed + "=" + String(probed));
+            }
+        } catch {
+            /* ignore inaccessible property */
+        }
+    }
+
+    return parts.length ? parts.join(" ") : "leeres Objekt";
+}
+
+/** True for the normalized point form produced by normalizeReadValue. */
 function isPointValue(value) {
     return (
         value !== null &&
@@ -272,7 +537,7 @@ async function resolveReferenceTime(param, trackItem, sequence, timing) {
 async function computeAverageValue(param, fallbackTime) {
     const keyTimes = getKeyframeTimes(param);
     if (!keyTimes.length) {
-        return await param.getValueAtTime(fallbackTime);
+        return normalizeReadValue(await param.getValueAtTime(fallbackTime));
     }
 
     let sumX = 0;
@@ -282,7 +547,7 @@ async function computeAverageValue(param, fallbackTime) {
     let count = 0;
 
     for (let i = 0; i < keyTimes.length; i++) {
-        const value = await param.getValueAtTime(keyTimes[i]);
+        const value = normalizeReadValue(await param.getValueAtTime(keyTimes[i]));
         if (isPointValue(value)) {
             isPoint = true;
             sumX += value.x;
@@ -291,12 +556,12 @@ async function computeAverageValue(param, fallbackTime) {
             sumScalar += value;
         } else {
             // Unsupported type for averaging — fall back to a single sample.
-            return await param.getValueAtTime(fallbackTime);
+            return normalizeReadValue(await param.getValueAtTime(fallbackTime));
         }
         count++;
     }
 
-    if (!count) return await param.getValueAtTime(fallbackTime);
+    if (!count) return normalizeReadValue(await param.getValueAtTime(fallbackTime));
     if (isPoint) return { x: sumX / count, y: sumY / count };
     return sumScalar / count;
 }
@@ -311,18 +576,24 @@ async function planParam(component, paramIndex, trackItem, sequence, timing) {
 
     const referenceTime = await resolveReferenceTime(param, trackItem, sequence, timing);
 
-    const value =
+    const rawValue =
         timing === TIMING.AVERAGE
             ? await computeAverageValue(param, referenceTime)
             : await param.getValueAtTime(referenceTime);
+
+    // The average path already returns normalized data; a direct read does not.
+    const value =
+        timing === TIMING.AVERAGE ? rawValue : normalizeReadValue(rawValue);
 
     if (!isWritableValue(value)) {
         throw new Error(
             'Parameter "' +
                 param.displayName +
-                '" lieferte keinen verwertbaren Wert (' +
-                String(value) +
-                ")."
+                '" lieferte keinen verwertbaren Wert.' +
+                " Struktur: " +
+                describeShape(rawValue) +
+                " | JSON: " +
+                safeJson(rawValue)
         );
     }
 
@@ -506,6 +777,19 @@ async function runSmoothAutoFrame(rawOptions) {
         // Echoed back so the panel can show which option was actually applied —
         // this makes a mis-read picker value visible instead of silent.
         timing: options.timing,
+        // Context for exported diagnostics logs.
+        meta: {
+            timestamp: new Date().toISOString(),
+            pluginVersion: PLUGIN_VERSION,
+            options: {
+                timing: options.timing,
+                fixScale: options.fixScale,
+                fixRotation: options.fixRotation,
+                dryRun: options.dryRun,
+                keyframeMode: options.keyframeMode
+            },
+            host: describeHost()
+        },
         results: [],
         notes: []
     };

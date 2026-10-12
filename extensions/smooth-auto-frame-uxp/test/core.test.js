@@ -285,6 +285,98 @@ function reset() { log.length = 0; }
         assert.strictEqual(sv.value.x, 0.54, "erwartet Wert des 2s-Keyframes (0.54), war " + sv.value.x);
     });
 
+    // --- Werteformen, die Premiere real zurückgeben kann -------------------
+    // Hintergrund: in echtem Premiere kam fuer Position ein Objekt zurueck, das
+    // NICHT direkt {x,y} war ("[object Object]"). Die Leseschicht muss daher
+    // mehrere Verpackungen vertragen.
+
+    const shapeCases = [
+        ["PointF-artig {x,y}",        () => new PointF(0.42, 0.5),              0.42],
+        ["Wrapper {value:{x,y}}",     () => ({ value: new PointF(0.42, 0.5) }), 0.42],
+        ["doppelt verpackt",          () => ({ value: { value: new PointF(0.42, 0.5) } }), 0.42],
+        ["Array [x,y]",               () => [0.42, 0.5],                        0.42],
+        ["Wrapper um Array",          () => ({ value: [0.42, 0.5] }),            0.42],
+        ["numerische Strings",        () => ({ x: "0.42", y: "0.5" }),           0.42]
+    ];
+
+    for (const [label, make, expectedX] of shapeCases) {
+        await t("Position als " + label + " wird gelesen und geschrieben", async () => {
+            const position = new MockParam("Position", [{ t: S(1), v: make() }], null, true);
+            const overridePan = new MockParam("Override Generated Pan", [], false, false);
+            const comp = new MockComponent("AE.ADBE AutoReframe", "Auto Reframe", [overridePan, position]);
+            const clip = new MockTrackItem("shape.mov", new MockChain([comp]), S(1), S(3), S(0));
+            currentProject = makeProject({
+                async getSelection() { return { async getTrackItems() { return [clip]; } }; },
+                async getPlayerPosition() { return new TickTime(0); }
+            });
+
+            const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
+            assert.strictEqual(r.errors, 0, "Fehler gemeldet: " + JSON.stringify(r.results));
+            const sv = log.find((l) => l.kind === "setValue" && l.param === "Position");
+            assert.ok(sv, "keine setValue-Action erzeugt");
+            assert.ok(sv.value instanceof PointF, "Wert ist kein PointF");
+            assert.ok(Math.abs(sv.value.x - expectedX) < 1e-9, "x=" + sv.value.x);
+        });
+    }
+
+    await t("Unlesbarer Wert: Fehlermeldung nennt Struktur UND JSON statt [object Object]", async () => {
+        const position = new MockParam("Position", [{ t: S(1), v: { foo: "bar", nested: {} } }], null, true);
+        const comp = new MockComponent("AE.ADBE AutoReframe", "Auto Reframe", [position]);
+        const clip = new MockTrackItem("bad.mov", new MockChain([comp]), S(1), S(3), S(0));
+        currentProject = makeProject({
+            async getSelection() { return { async getTrackItems() { return [clip]; } }; },
+            async getPlayerPosition() { return new TickTime(0); }
+        });
+
+        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
+        assert.strictEqual(r.errors, 1, "erwartete genau einen Fehler");
+        const reason = r.results[0].reason;
+        assert.ok(!reason.includes("[object Object]"), "Meldung enthaelt noch [object Object]: " + reason);
+        assert.ok(reason.includes("keys=") || reason.includes("typ="),
+            "Meldung nennt die Struktur nicht: " + reason);
+        assert.ok(reason.includes("JSON:"), "Meldung enthaelt kein JSON: " + reason);
+        assert.ok(reason.includes('"foo"'), "JSON enthaelt die Daten nicht: " + reason);
+        assert.strictEqual(log.length, 0, "es wurde trotz unlesbarem Wert geschrieben");
+    });
+
+    await t("JSON-Diagnose erfasst auch Prototyp-Getter (Host-Objekte)", async () => {
+        // Premieres Host-Objekte legen Daten hinter Prototyp-Getter. Plain
+        // JSON.stringify liefert dafuer "{}" - safeJson muss sie trotzdem zeigen.
+        class HostLike {
+            get unitType() { return "percent"; }
+            get payload() { return "verborgen"; }
+        }
+        const hostish = new HostLike();
+        assert.strictEqual(JSON.stringify(hostish), "{}", "Vorbedingung: stringify liefert {}");
+
+        const position = new MockParam("Position", [{ t: S(1), v: hostish }], null, true);
+        const comp = new MockComponent("AE.ADBE AutoReframe", "Auto Reframe", [position]);
+        const clip = new MockTrackItem("hostish.mov", new MockChain([comp]), S(1), S(3), S(0));
+        currentProject = makeProject({
+            async getSelection() { return { async getTrackItems() { return [clip]; } }; },
+            async getPlayerPosition() { return new TickTime(0); }
+        });
+
+        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
+        const reason = r.results[0].reason;
+        assert.ok(reason.includes("unitType") || reason.includes("payload"),
+            "Prototyp-Getter fehlen in der Diagnose: " + reason);
+    });
+
+    await t("Report enthält Meta-Block für den Log-Export", async () => {
+        buildScenario();
+        const r = await runSmoothAutoFrame({ timing: "middle", fixScale: true, dryRun: true });
+        assert.ok(r.meta, "kein meta-Block");
+        assert.ok(r.meta.timestamp, "kein timestamp");
+        assert.strictEqual(r.meta.options.timing, "middle", "Optionen nicht protokolliert");
+        assert.strictEqual(r.meta.options.fixScale, true);
+        assert.strictEqual(r.meta.options.dryRun, true);
+        assert.ok(r.meta.pluginVersion, "keine pluginVersion");
+        // Muss als JSON exportierbar sein (das macht der Panel-Button).
+        const text = JSON.stringify(r, null, 2);
+        assert.ok(text.length > 50 && text.includes('"meta"'), "Report nicht exportierbar");
+    });
+
     console.log(failures === 0
         ? "\n  ALLE TESTS BESTANDEN\n"
         : "\n  " + failures + " TEST(S) FEHLGESCHLAGEN\n");
