@@ -30,7 +30,8 @@ export default defineConfig(
                 module: "writable",
                 console: "readonly",
                 document: "readonly",
-                navigator: "readonly"
+                navigator: "readonly",
+                setTimeout: "readonly"
             }
         }
     },

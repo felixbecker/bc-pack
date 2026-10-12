@@ -257,6 +257,20 @@ function buildShapeScenario(rawValue, paramOptions) {
     return Object.assign({ override, position }, parts);
 }
 
+/**
+ * Models "Position" as a DERIVED readout of the adjust parameter: it reports
+ * keyframes only while the source does. That is the behaviour the plugin now
+ * verifies — freezing the adjust parameter must settle the applied position.
+ * If real Premiere behaves differently, the verification reports it.
+ */
+function linkAppliedPosition(applied, source) {
+    applied.isTimeVarying = function () { return source.isTimeVarying(); };
+    applied.getKeyframeListAsTickTimes = function () {
+        return source.getKeyframeListAsTickTimes();
+    };
+    return applied;
+}
+
 function reset() { log.length = 0; }
 
 // ---- Tests -----------------------------------------------------------------
@@ -485,6 +499,7 @@ function reset() { log.length = 0; }
         p[11] = new MockParam("Reframing für Skalierung", [], 100, false);
         p[12] = new MockParam("Scale (Auto Generated)", [], 100, false);
         p[13] = new MockParam("Reframing für Drehung", [], 0, false);
+        linkAppliedPosition(p[2], p[6]);
 
         makeScenario(p, {
             matchName: "AE.ADBE AEFilterAutoFramer",
@@ -506,6 +521,62 @@ function reset() { log.length = 0; }
         assert.strictEqual(r.results[0].overrideResolvedBy, "index",
             "Auflösungsart nicht protokolliert");
         assert.ok(r.results[0].paramsAfter, "paramsAfter fehlt");
+    });
+
+    await t("REGRESSION: verzögerte Keyframe-Übertragung wird abgewartet", async () => {
+        /*
+         * Premiere uebertraegt den erzeugten Pfad NICHT synchron auf den
+         * bearbeitbaren Parameter, wenn die Checkbox committed wird. Eine
+         * frühere Fassung las sofort danach, bekam 0 Keyframes und den
+         * neutralen Wert 0.5 — und fror diesen fest, mit Erfolgsmeldung.
+         */
+        let committedAt = null;
+        let reveals = 0;
+
+        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
+        const origSet = override.createSetValueAction.bind(override);
+        override.createSetValueAction = function (kf, safe) {
+            const action = origSet(kf, safe);
+            const origApply = action.apply;
+            action.apply = () => { origApply(); if (kf.value === true) committedAt = Date.now(); };
+            return action;
+        };
+
+        const adjust = new MockParam("Position anpassen", [
+            { t: S(1), v: new PointF(0.6889, 0.5) },
+            { t: S(2), v: new PointF(0.72, 0.5) }
+        ], new PointF(0.5, 0.5), true);
+
+        // Keyframes erscheinen erst ~250 ms nach dem Commit.
+        const origList = adjust.getKeyframeListAsTickTimes.bind(adjust);
+        const origTv = adjust.isTimeVarying.bind(adjust);
+        const revealed = () => committedAt !== null && Date.now() - committedAt >= 250;
+        adjust.getKeyframeListAsTickTimes = function () {
+            return revealed() ? origList() : [];
+        };
+        adjust.isTimeVarying = function () {
+            // getKeyframeTimes() bricht hier ab, wenn false -> hier zaehlen.
+            if (!revealed()) { reveals++; return false; }
+            return origTv();
+        };
+
+        const generated = new MockParam("Generated Keyframes", [
+            { t: S(1), v: new PointF(0.5, 0.5) },
+            { t: S(2), v: new PointF(0.5, 0.5) }
+        ], null, true);
+
+        const applied = new MockParam("Position", [], new PointF(0.6889, 0.5), false);
+        linkAppliedPosition(applied, adjust);
+
+        makeScenario([override, applied, adjust, generated], { clipName: "delayed.mov" });
+
+        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
+        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
+        assert.ok(reveals > 0, "es wurde nie zu frueh gelesen - Test greift nicht");
+        // Entscheidend: der ECHTE erste Keyframe-Wert, nicht der neutrale 0.5.
+        assert.ok(Math.abs(adjust._static.x - 0.6889) < 1e-9,
+            "neutraler Wert eingefroren statt echtem: " + adjust._static.x);
+        assert.ok(r.results[0].keyframeWaitAttempts >= 1, "keine Wartezyklen protokolliert");
     });
 
     await t("Referenz 'end' nimmt den LETZTEN Keyframe-Wert", async () => {
@@ -598,6 +669,7 @@ function reset() { log.length = 0; }
         const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
         const merged = new MockParam("Position", [{ t: S(1), v: new PointF(0.11, 0.11) }], null, true);
         const adjust = new MockParam("Position anpassen", [{ t: S(1), v: new PointF(0.72, 0.5) }], null, true);
+        linkAppliedPosition(merged, adjust);
         const s = makeScenario([override, merged, adjust], { clipName: "prio.mov" });
 
         const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });

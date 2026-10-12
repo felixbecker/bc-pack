@@ -157,6 +157,23 @@ function knownParamIndex(matchName, key) {
     return typeof index === "number" ? index : -1;
 }
 
+/**
+ * Waits. Needed because Premiere does not transfer the generated path onto the
+ * editable parameter synchronously when the override checkbox is committed.
+ */
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/*
+ * Parameters used for verification only (never written):
+ *   "Position"            — the APPLIED position; if this still animates, the
+ *                           movement is still there, whatever else we changed.
+ *   "Generated Keyframes" — the raw analyzed path.
+ */
+const APPLIED_POSITION_NAMES = ["position"];
+const GENERATED_PATH_NAMES = ["generated keyframes", "erzeugte keyframes"];
+
 /* "Position anpassen" / "Adjust Position" must outrank the bare "Position". */
 const POSITION_PARAM_NAMES = ["adjust position", "position anpassen", "position"];
 const POSITION_FRAGMENTS = ["position anpassen", "adjust position", "position"];
@@ -177,7 +194,7 @@ const PLUGIN_VERSION = "1.0.0";
  * matched to the build that produced it — without this it was unclear whether
  * a report came from the current code or a stale installed copy.
  */
-const DIAGNOSTICS_VERSION = 4;
+const DIAGNOSTICS_VERSION = 5;
 
 /**
  * Collects host application info for diagnostics logs. Wrapped defensively
@@ -1111,6 +1128,54 @@ async function planClipValues(discovery, sequence, options) {
     return validTargets;
 }
 
+
+/**
+ * Number of keyframes on the raw generated path, i.e. how many the editable
+ * parameter should receive once the override is enabled.
+ */
+async function countGeneratedKeyframes(plan) {
+    try {
+        const component = plan.chain.getComponentAtIndex(plan.componentIndex);
+        if (!component) return 0;
+        const index = findParamIndex(component, GENERATED_PATH_NAMES, null);
+        if (index < 0) return 0;
+        const param = component.getParam(index);
+        return param ? getKeyframeTimes(param).length : 0;
+    } catch {
+        return 0;
+    }
+}
+
+/**
+ * Polls until the editable parameter exposes keyframes, re-fetching the
+ * component chain each attempt. Returns false on timeout.
+ */
+async function waitForKeyframes(plan, expected) {
+    const ATTEMPTS = 25;
+    const INTERVAL_MS = 120;
+
+    for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+        try {
+            const refreshed = await plan.trackItem.getComponentChain();
+            if (refreshed) plan.chain = refreshed;
+            const component = plan.chain.getComponentAtIndex(plan.componentIndex);
+            if (component) {
+                const param = component.getParam(plan.paramIndexes[0]);
+                if (param && getKeyframeTimes(param).length > 0) {
+                    plan.keyframeWaitAttempts = attempt + 1;
+                    return true;
+                }
+            }
+        } catch {
+            /* retry */
+        }
+        await delay(INTERVAL_MS);
+    }
+
+    void expected;
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2 — writing (synchronous, inside one transaction)
 // ---------------------------------------------------------------------------
@@ -1416,7 +1481,39 @@ async function runSmoothAutoFrame(rawOptions) {
                 continue;
             }
 
-            // Now that the override is active, the keyframes are visible.
+            /*
+             * Premiere transfers the generated path onto the editable
+             * parameter ASYNCHRONOUSLY after the checkbox is committed.
+             * Reading immediately returns zero keyframes and the neutral
+             * default — an earlier version froze that neutral value and
+             * reported success while the movement stayed untouched.
+             *
+             * So wait until the editable parameter actually exposes keyframes.
+             * The raw generated path tells us how many to expect; if it has
+             * none either, there is nothing to wait for.
+             */
+            const expected = await countGeneratedKeyframes(plan);
+            if (expected > 0) {
+                const appeared = await waitForKeyframes(plan, expected);
+                if (!appeared) {
+                    report.errors++;
+                    report.results.push({
+                        clipName: plan.clipName,
+                        status: "error",
+                        reason:
+                            "Nach dem Aktivieren der Checkbox hat Premiere die " +
+                            expected +
+                            " Keyframes des erzeugten Pfads nicht auf den " +
+                            "bearbeitbaren Parameter übertragen. Es wurde nichts " +
+                            "geschrieben, um nicht den neutralen Standardwert " +
+                            "festzuschreiben.",
+                        params: plan.params
+                    });
+                    continue;
+                }
+            }
+
+            // Now that the override is active AND the keyframes are present.
             plan.targets = await planClipValues(plan, sequence, options);
             stillPlanned.push(plan);
         } catch (error) {
@@ -1617,6 +1714,7 @@ async function runSmoothAutoFrame(rawOptions) {
 
         const changes = [];
         const problems = [];
+        let appliedState = null;
 
 
         try {
@@ -1678,6 +1776,47 @@ async function runSmoothAutoFrame(rawOptions) {
                     timeVaryingAfter: stillVarying
                 });
             }
+            /*
+             * The decisive criterion. Everything above only proves the written
+             * parameter is static. What actually matters is whether the APPLIED
+             * position stopped animating — an earlier version froze a neutral
+             * adjustment value and reported success while "Position" kept its
+             * keyframes and the clip kept drifting.
+             */
+            const appliedIndex = component
+                ? findParamIndex(component, APPLIED_POSITION_NAMES, null)
+                : -1;
+            if (appliedIndex >= 0 && appliedIndex !== plan.paramIndexes[0]) {
+                const applied = component.getParam(appliedIndex);
+                if (applied) {
+                    const appliedKeyframes = getKeyframeTimes(applied).length;
+                    let appliedVarying = null;
+                    try {
+                        appliedVarying = applied.isTimeVarying();
+                    } catch {
+                        appliedVarying = null;
+                    }
+
+                    appliedState = {
+                        param: applied.displayName,
+                        keyframes: appliedKeyframes,
+                        timeVarying: appliedVarying
+                    };
+
+                    if (appliedKeyframes > 0 || appliedVarying === true) {
+                        problems.push(
+                            'Die angewandte Position ("' +
+                                applied.displayName +
+                                '") animiert weiterhin (' +
+                                appliedKeyframes +
+                                " Keyframes). Die Bewegung ist also NICHT entfernt, " +
+                                'obwohl "' +
+                                plan.targets[0].paramName +
+                                '" fixiert wurde.'
+                        );
+                    }
+                }
+            }
         } catch (error) {
             problems.push("Nachprüfung fehlgeschlagen: " + describeError(error));
         }
@@ -1708,6 +1847,7 @@ async function runSmoothAutoFrame(rawOptions) {
                     " Parameter des Effekts: " +
                     safeJson(paramsAfter || plan.params),
                 changes: changes,
+                appliedPosition: appliedState,
                 params: plan.params,
                 paramsAfter: paramsAfter
             });
@@ -1722,7 +1862,9 @@ async function runSmoothAutoFrame(rawOptions) {
                 ? "Auf Hold-Keyframes reduziert und nachgeprüft."
                 : "Auf konstanten Wert fixiert und nachgeprüft (keine Keyframes mehr).",
             changes: changes,
+            appliedPosition: appliedState,
             overrideResolvedBy: plan.overrideResolvedBy,
+            keyframeWaitAttempts: plan.keyframeWaitAttempts || null,
             paramsAfter: paramsAfter
         });
     }
