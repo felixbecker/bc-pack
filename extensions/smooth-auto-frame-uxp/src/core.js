@@ -58,7 +58,12 @@ const VALID_TIMING = [
  * on matchName fragments first (stable across locales when present) and fall
  * back to localized display names.
  */
-const AUTO_REFRAME_MATCHNAME_FRAGMENTS = ["autoreframe", "auto_reframe", "aireframe"];
+const AUTO_REFRAME_MATCHNAME_FRAGMENTS = [
+    "autoframer",
+    "autoreframe",
+    "auto_reframe",
+    "aireframe"
+];
 
 const AUTO_REFRAME_DISPLAY_NAMES = [
     "auto reframe",
@@ -100,8 +105,35 @@ const OVERRIDE_PAN_PARAM_NAMES = [
 ];
 const OVERRIDE_PAN_FRAGMENTS = ["überschreib", "uberschreib", "override", "overwrite"];
 
-const POSITION_PARAM_NAMES = ["adjust position", "position", "position anpassen"];
-const POSITION_FRAGMENTS = ["position"];
+/*
+ * Observed layout of AE.ADBE AEFilterAutoFramer (Premiere 26.3.2, de_DE):
+ *
+ *   0  " "                        (blank name)
+ *   1  "Motion-Tracking"
+ *   2  "Position"                 merged transform output, keyframed
+ *   3  "Scale (Merged)"
+ *   4  "Uniform Scale"
+ *   5  "Anchor Point"
+ *   6  "Position anpassen"        <- the parameter the manual workflow edits
+ *   7  "Generated Keyframes"      the raw generated path
+ *   8  ""                         (blank name)
+ *   9  "Hash arb data"
+ *  10  "Reframing für Versatz"
+ *  11  "Reframing für Skalierung"
+ *  12  "Scale (Auto Generated)"
+ *  13  "Reframing für Drehung"
+ *
+ * Note that the "override generated path" checkbox visible in the UI has NO
+ * usable displayName here — it is one of the blank entries. Name matching can
+ * therefore never find it, which is why parameter VALUES are dumped as well:
+ * the checkbox is identified by observing which parameter flips when it is
+ * toggled manually.
+ */
+const AUTO_REFRAME_MATCHNAME = "AE.ADBE AEFilterAutoFramer";
+
+/* "Position anpassen" / "Adjust Position" must outrank the bare "Position". */
+const POSITION_PARAM_NAMES = ["adjust position", "position anpassen", "position"];
+const POSITION_FRAGMENTS = ["position anpassen", "adjust position", "position"];
 
 const SCALE_PARAM_NAMES = ["adjust scale", "scale", "skalierung", "skalierung anpassen"];
 const SCALE_FRAGMENTS = ["scale", "skalier", "zoom"];
@@ -495,6 +527,9 @@ async function findAutoReframeComponent(trackItem) {
         components.push({ index: i, matchName: matchName, name: displayName });
 
         if (
+            // Exact matchName is the most reliable identifier: it is not
+            // localized and does not change with the UI language.
+            normalizeName(matchName) === normalizeName(AUTO_REFRAME_MATCHNAME) ||
             containsFragment(matchName, AUTO_REFRAME_MATCHNAME_FRAGMENTS) ||
             containsFragment(displayName, AUTO_REFRAME_MATCHNAME_FRAGMENTS) ||
             nameMatches(displayName, AUTO_REFRAME_DISPLAY_NAMES)
@@ -514,29 +549,35 @@ async function findAutoReframeComponent(trackItem) {
 
 /**
  * Finds a parameter index on a component.
- * `ComponentParam.displayName` is a synchronous property.
  *
- * Tries exact localized names first, then falls back to substring fragments
- * so a label we have not seen before ("Erzeugten Pfad überschreiben") still
- * resolves. Returns -1 when nothing matches.
+ * Candidates are tried in PRIORITY ORDER, not in parameter order: the Auto
+ * Reframe effect exposes both "Position" (the merged transform output) and
+ * "Position anpassen" / "Adjust Position" (the parameter the manual workflow
+ * edits). Scanning parameters first and matching any name would pick whichever
+ * comes earlier in the effect, which is the wrong one.
+ *
+ * Exact names are preferred over substring fragments. Returns -1 when nothing
+ * matches.
  */
 function findParamIndex(component, candidateNames, fragments) {
     const count = component.getParamCount();
 
-    for (let i = 0; i < count; i++) {
-        const param = component.getParam(i);
-        if (param && nameMatches(param.displayName, candidateNames)) {
-            return i;
+    for (let c = 0; c < candidateNames.length; c++) {
+        const wanted = normalizeName(candidateNames[c]);
+        for (let i = 0; i < count; i++) {
+            const param = component.getParam(i);
+            if (param && normalizeName(param.displayName) === wanted) return i;
         }
     }
 
     if (fragments && fragments.length) {
-        for (let i = 0; i < count; i++) {
-            const param = component.getParam(i);
-            if (!param) continue;
-            const normalized = normalizeName(param.displayName);
-            for (let f = 0; f < fragments.length; f++) {
-                if (normalized.indexOf(fragments[f]) !== -1) return i;
+        for (let f = 0; f < fragments.length; f++) {
+            for (let i = 0; i < count; i++) {
+                const param = component.getParam(i);
+                if (!param) continue;
+                if (normalizeName(param.displayName).indexOf(fragments[f]) !== -1) {
+                    return i;
+                }
             }
         }
     }
@@ -571,13 +612,36 @@ async function resolveRequiredParam(
     const index = findParamIndex(component, candidateNames, fragments);
 
     if (index < 0) {
+        let hint = "";
+        if (expectBoolean && paramDump && paramDump.length) {
+            const booleans = [];
+            for (let i = 0; i < paramDump.length; i++) {
+                if (paramDump[i].valueType === "boolean") {
+                    booleans.push(
+                        "Index " +
+                            paramDump[i].index +
+                            ' ("' +
+                            (paramDump[i].name || "") +
+                            '") = ' +
+                            paramDump[i].value
+                    );
+                }
+            }
+            hint = booleans.length
+                ? " Parameter mit Wahrheitswert (mögliche Checkbox): " +
+                  booleans.join("; ") +
+                  "."
+                : " Es gibt keinen Parameter mit Wahrheitswert.";
+        }
+
         throw new Error(
             'Parameter "' +
                 label +
                 '" wurde im Auto-Reframe-Effekt nicht gefunden. Die UXP-API ' +
                 "bietet für Parameter nur den lokalisierten Anzeigenamen, daher " +
-                "kann die Suche bei einer unbekannten Sprachversion fehlschlagen. " +
-                "Vorhandene Parameter: " +
+                "kann die Suche bei einer unbekannten Sprachversion fehlschlagen." +
+                hint +
+                " Vorhandene Parameter: " +
                 safeJson(paramDump)
         );
     }
@@ -631,13 +695,14 @@ function TickTimeZero() {
 
 /**
  * Dumps every parameter of a component: index, display name, whether it is
- * keyframed and how many keyframes it has.
+ * keyframed, how many keyframes it has — and its CURRENT VALUE.
  *
- * This exists because parameters can only be addressed by localized name or
- * by index. The dump makes the real index layout visible, which is the only
- * language-independent handle the API offers.
+ * The values matter because the override checkbox has no usable displayName in
+ * this effect. Dumping values makes it identifiable empirically: toggle the
+ * checkbox in Premiere, dump again, and the parameter that flipped is the one.
+ * Purely read-only.
  */
-function describeComponentParams(component) {
+async function describeComponentParams(component) {
     const params = [];
     let count = 0;
     try {
@@ -647,7 +712,7 @@ function describeComponentParams(component) {
     }
 
     for (let i = 0; i < count; i++) {
-        let entry = { index: i };
+        const entry = { index: i };
         try {
             const param = component.getParam(i);
             if (!param) {
@@ -666,6 +731,23 @@ function describeComponentParams(component) {
             } catch {
                 entry.keyframes = null;
             }
+
+            let raw;
+            try {
+                raw = await param.getStartValue();
+            } catch {
+                raw = undefined;
+            }
+            if (raw === undefined) {
+                try {
+                    raw = await param.getValueAtTime(TickTimeZero());
+                } catch {
+                    raw = undefined;
+                }
+            }
+            const normalized = normalizeReadValue(raw);
+            entry.value = normalized === null ? safeJson(raw) : normalized;
+            entry.valueType = typeof normalized;
         } catch (error) {
             entry.note = describeError(error);
         }
@@ -865,7 +947,7 @@ async function buildClipPlan(trackItem, sequence, options) {
     }
 
     const component = found.component;
-    const paramDump = describeComponentParams(component);
+    const paramDump = await describeComponentParams(component);
 
     try {
         return await planClipTargets(

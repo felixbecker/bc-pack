@@ -485,6 +485,47 @@ function reset() { log.length = 0; }
         assert.strictEqual(log.length, 0, "es wurde geschrieben");
     });
 
+    await t("Echter matchName AE.ADBE AEFilterAutoFramer wird erkannt", async () => {
+        // Aus echtem Premiere 26.3.2 (de_DE) beobachtet.
+        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
+        const position = new MockParam("Position anpassen", [{ t: S(1), v: new PointF(0.72, 0.5) }], null, true);
+        makeScenario([override, position], {
+            matchName: "AE.ADBE AEFilterAutoFramer",
+            displayName: "Auto Reframe",
+            clipName: "real.mov"
+        });
+        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
+        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
+        assert.strictEqual(r.processed, 1);
+    });
+
+    await t("'Position anpassen' hat Vorrang vor blossem 'Position'", async () => {
+        // Echter Effekt hat BEIDE. Das Tutorial bearbeitet "Adjust Position".
+        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
+        const merged = new MockParam("Position", [{ t: S(1), v: new PointF(0.11, 0.11) }], null, true);
+        const adjust = new MockParam("Position anpassen", [{ t: S(1), v: new PointF(0.72, 0.5) }], null, true);
+        const s = makeScenario([override, merged, adjust], { clipName: "prio.mov" });
+
+        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
+        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
+        assert.strictEqual(r.results[0].changes[0].param, "Position anpassen",
+            "falscher Parameter gewaehlt: " + r.results[0].changes[0].param);
+        assert.strictEqual(merged._keys.length, 1, "falscher Parameter wurde verändert");
+        assert.strictEqual(adjust._keys.length, 0, "Zielparameter nicht bereinigt");
+        void s;
+    });
+
+    await t("Parameter-Dump enthält Werte und Werttypen", async () => {
+        buildScenario();
+        const r = await runSmoothAutoFrame({ timing: "start", dryRun: true });
+        const dump = r.results[0].params;
+        assert.ok(dump && dump.length, "kein Dump");
+        const override = dump.find((p) => p.name.indexOf("überschreiben") !== -1);
+        assert.ok(override, "Override nicht im Dump");
+        assert.strictEqual(override.valueType, "boolean", "Werttyp fehlt/falsch");
+        assert.strictEqual(override.value, false, "Wert fehlt");
+    });
+
     await t("Auto Reframe wird neben anderen Effekten gefunden", async () => {
         const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
         const position = new MockParam("Position", [{ t: S(1), v: new PointF(0.2, 0.3) }], null, true);
