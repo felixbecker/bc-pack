@@ -166,8 +166,18 @@ In-/Out-Points als Fallback.
 
 ### Minimale Rechte
 
-Die `manifest.json` deklariert **keine** `requiredPermissions`. Das Plugin
-braucht weder Netzwerk- noch Dateisystem-, Prozess- oder Clipboard-Zugriff.
+Die `manifest.json` deklariert bewusst nur zwei, eng gefasste Berechtigungen —
+beide ausschließlich für den Log-Export:
+
+| Berechtigung | Wofür | Umfang |
+|---|---|---|
+| `clipboard: "readAndWrite"` | Button „Log kopieren" | UXP kennt keine Schreib-only-Stufe; gelesen wird nie. |
+| `localFileSystem: "request"` | Button „Log speichern…" | Nur Dateien, die der Nutzer im Speicherdialog selbst auswählt. Kein stiller Zugriff, kein `fullAccess`. |
+
+**Nicht** angefordert: Netzwerk, `fullAccess`, Prozessstart,
+`allowCodeGenerationFromStrings`, Webview, IPC. Der Kernalgorithmus selbst
+braucht keine Berechtigung — ohne die Export-Buttons wäre das Manifest
+berechtigungsfrei.
 
 ## Bekannte Einschränkungen
 

@@ -120,11 +120,13 @@ UnifiedPluginInstallerAgent.exe /install "C:\Pfad\com.smoothautoframe.uxp_premie
 Admin-Rechte können nötig sein. CCX-Unterstützung in UPIA gibt es ab Creative
 Cloud Desktop 5.7.
 
-Weil dieses Plugin **keine** `requiredPermissions` deklariert (kein Netzwerk,
-kein Dateisystem, keine Prozesse), entfällt die Rechteabfrage, die Adobe für
-Plugins mit solchen Zugriffen beschreibt. Und da es keine native
-`.uxpaddon`-Bibliothek enthält, braucht es **keine Apple-Developer-ID und keine
-Notarisierung**.
+Dieses Plugin fordert zwei eng gefasste Berechtigungen an, beide nur für den
+Log-Export: `clipboard` (Button „Log kopieren") und `localFileSystem: "request"`
+(Button „Log speichern…" — gewährt Zugriff ausschließlich auf Dateien, die du
+selbst im Speicherdialog auswählst). Bei der Installation kann dafür eine
+Rechtebestätigung erscheinen. Netzwerkzugriff, `fullAccess` oder Prozessstart
+werden **nicht** angefordert. Und da keine native `.uxpaddon`-Bibliothek
+enthalten ist, braucht es **keine Apple-Developer-ID und keine Notarisierung**.
 
 ### 9. UDT-Version entladen
 
