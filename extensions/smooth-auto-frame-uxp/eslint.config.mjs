@@ -29,7 +29,8 @@ export default defineConfig(
                 require: "readonly",
                 module: "writable",
                 console: "readonly",
-                document: "readonly"
+                document: "readonly",
+                navigator: "readonly"
             }
         }
     },

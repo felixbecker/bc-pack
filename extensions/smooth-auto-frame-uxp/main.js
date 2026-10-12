@@ -34,12 +34,48 @@ function cacheElements() {
     el.keyframeMode = document.getElementById("keyframeMode");
     el.runButton = document.getElementById("runButton");
     el.clearButton = document.getElementById("clearButton");
+    el.copyButton = document.getElementById("copyButton");
+    el.saveButton = document.getElementById("saveButton");
     el.statusBar = document.getElementById("statusBar");
     el.summary = document.getElementById("summary");
     el.summaryOk = document.getElementById("summaryOk");
     el.summarySkipped = document.getElementById("summarySkipped");
     el.summaryError = document.getElementById("summaryError");
     el.log = document.getElementById("log");
+}
+
+/** Last report, kept so it can be copied or saved for diagnostics. */
+let lastReport = null;
+
+function setExportEnabled(enabled) {
+    el.copyButton.disabled = !enabled;
+    el.saveButton.disabled = !enabled;
+}
+
+/**
+ * Renders the last report as pretty-printed JSON for export. Includes the
+ * meta block (timestamp, plugin version, chosen options, host info) so a log
+ * is self-explanatory without having to ask what settings were used.
+ */
+function buildLogText() {
+    if (!lastReport) return "";
+    try {
+        return JSON.stringify(lastReport, null, 2);
+    } catch (error) {
+        return (
+            "Report konnte nicht serialisiert werden: " +
+            (error && error.message ? error.message : String(error))
+        );
+    }
+}
+
+function suggestedFileName() {
+    const stamp = new Date()
+        .toISOString()
+        .replace(/[:.]/g, "-")
+        .replace("T", "_")
+        .slice(0, 19);
+    return "smooth-auto-frame_" + stamp + ".json";
 }
 
 function clearChildren(node) {
@@ -187,6 +223,8 @@ async function onRun() {
 
     try {
         const report = await runSmoothAutoFrame(options);
+        lastReport = report;
+        setExportEnabled(true);
         renderReport(report);
         if (report.fatalError) {
             setStatus("Abgebrochen.");
@@ -201,6 +239,11 @@ async function onRun() {
     } catch (error) {
         const message =
             error && error.message ? error.message : String(error || "Unbekannter Fehler");
+        lastReport = {
+            fatalError: message,
+            meta: { timestamp: new Date().toISOString(), options: options }
+        };
+        setExportEnabled(true);
         setStatus("Fehler.");
         renderFatalError("Unerwarteter Fehler: " + message);
         console.error(error);
@@ -209,7 +252,53 @@ async function onRun() {
     }
 }
 
+/** Copies the last report to the system clipboard. */
+async function onCopy() {
+    const text = buildLogText();
+    if (!text) {
+        setStatus("Kein Log vorhanden.");
+        return;
+    }
+    try {
+        await navigator.clipboard.setContent({ "text/plain": text });
+        setStatus("Log in die Zwischenablage kopiert (" + text.length + " Zeichen).");
+    } catch (error) {
+        setStatus("Kopieren fehlgeschlagen.");
+        console.error(error);
+    }
+}
+
+/**
+ * Saves the last report to a user-chosen file.
+ * Uses a save dialog, so the plugin only ever touches the one file the user
+ * explicitly picked (manifest permission: localFileSystem "request").
+ */
+async function onSave() {
+    const text = buildLogText();
+    if (!text) {
+        setStatus("Kein Log vorhanden.");
+        return;
+    }
+    try {
+        const { localFileSystem } = require("uxp").storage;
+        const file = await localFileSystem.getFileForSaving(suggestedFileName(), {
+            types: ["json"]
+        });
+        if (!file) {
+            setStatus("Speichern abgebrochen.");
+            return;
+        }
+        await file.write(text);
+        setStatus("Log gespeichert: " + (file.nativePath || file.name));
+    } catch (error) {
+        setStatus("Speichern fehlgeschlagen.");
+        console.error(error);
+    }
+}
+
 function onClear() {
+    lastReport = null;
+    setExportEnabled(false);
     showEmptyState();
     setStatus("");
 }
@@ -218,6 +307,9 @@ function init() {
     cacheElements();
     el.runButton.addEventListener("click", onRun);
     el.clearButton.addEventListener("click", onClear);
+    el.copyButton.addEventListener("click", onCopy);
+    el.saveButton.addEventListener("click", onSave);
+    setExportEnabled(false);
     showEmptyState();
 }
 
