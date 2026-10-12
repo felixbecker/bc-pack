@@ -146,6 +146,13 @@ const INTERP_MODE_HOLD = 4;
 
 const PLUGIN_VERSION = "1.0.0";
 
+/*
+ * Incremented whenever the diagnostics payload changes. A log can then be
+ * matched to the build that produced it — without this it was unclear whether
+ * a report came from the current code or a stale installed copy.
+ */
+const DIAGNOSTICS_VERSION = 3;
+
 /**
  * Collects host application info for diagnostics logs. Wrapped defensively
  * because the exact shape of the UXP host object is not guaranteed across
@@ -911,10 +918,17 @@ async function planParam(component, paramIndex, trackItem, sequence, timing) {
 }
 
 /**
- * Phase 1 for a single clip. Returns a plan (no mutation performed) or a
- * skip/error record.
+ * Discovery for a single clip: locate the effect and resolve the parameter
+ * indices. Reads NO keyframe data yet.
+ *
+ * Splitting discovery from value reading is required by how Auto Reframe
+ * behaves: with the override checkbox off, "Position" and "Position anpassen"
+ * report as non-keyframed with zero keyframes — the generated path lives in a
+ * separate "Generated Keyframes" parameter. The keyframes only become visible
+ * on the editable parameters once the checkbox is enabled. Reading values
+ * before that point therefore yields the wrong reference value.
  */
-async function buildClipPlan(trackItem, sequence, options) {
+async function discoverClip(trackItem, options) {
     let clipName = "(unbenannter Clip)";
     try {
         clipName = (await trackItem.getName()) || clipName;
@@ -950,9 +964,54 @@ async function buildClipPlan(trackItem, sequence, options) {
     const paramDump = await describeComponentParams(component);
 
     try {
-        return await planClipTargets(
-            trackItem, sequence, options, clipName, found, component, paramDump
+        const position = await resolveRequiredParam(
+            component, "Position", POSITION_PARAM_NAMES, POSITION_FRAGMENTS, paramDump
         );
+        const override = await resolveRequiredParam(
+            component,
+            "Erzeugten Pfad überschreiben",
+            OVERRIDE_PAN_PARAM_NAMES,
+            OVERRIDE_PAN_FRAGMENTS,
+            paramDump,
+            true
+        );
+
+        const extras = [];
+        if (options.fixScale) {
+            extras.push(
+                await resolveRequiredParam(
+                    component, "Skalierung", SCALE_PARAM_NAMES, SCALE_FRAGMENTS, paramDump
+                )
+            );
+        }
+        if (options.fixRotation) {
+            extras.push(
+                await resolveRequiredParam(
+                    component, "Drehung", ROTATION_PARAM_NAMES, ROTATION_FRAGMENTS, paramDump
+                )
+            );
+        }
+
+        let overrideActive = null;
+        try {
+            overrideActive =
+                normalizeReadValue(await override.param.getStartValue()) === true;
+        } catch {
+            overrideActive = null;
+        }
+
+        return {
+            status: "discovered",
+            clipName: clipName,
+            trackItem: trackItem,
+            chain: found.chain,
+            componentIndex: found.index,
+            overridePanIndex: override.index,
+            overrideActiveBefore: overrideActive,
+            paramIndexes: [position.index].concat(extras.map((e) => e.index)),
+            params: paramDump,
+            components: found.components
+        };
     } catch (error) {
         // A failed lookup or an unusable value aborts this clip loudly, with
         // the full parameter layout attached so the cause is visible.
@@ -967,82 +1026,38 @@ async function buildClipPlan(trackItem, sequence, options) {
 }
 
 /**
- * Resolves every required parameter and builds the write plan.
- * Throws (never returns "not found") so the caller reports a hard error.
+ * Reads the reference values for a discovered clip and builds the write plan.
+ * Must run AFTER the override checkbox has been enabled — see discoverClip.
  */
-async function planClipTargets(
-    trackItem, sequence, options, clipName, found, component, paramDump
-) {
-    /*
-     * Every parameter below is REQUIRED and resolved via resolveRequiredParam,
-     * which throws with diagnostics rather than returning "not found".
-     *
-     * Scale and Rotation are required only when the user asked for them — but
-     * then they are genuinely required: silently not freezing a parameter the
-     * user explicitly ticked, and still reporting success, is the same class of
-     * bug as the missing override checkbox.
-     */
-    const position = await resolveRequiredParam(
-        component, "Position", POSITION_PARAM_NAMES, POSITION_FRAGMENTS, paramDump
-    );
-
-    // Verified to read as a boolean, so a numeric parameter cannot be mistaken
-    // for the checkbox.
-    const override = await resolveRequiredParam(
-        component,
-        "Erzeugten Pfad überschreiben",
-        OVERRIDE_PAN_PARAM_NAMES,
-        OVERRIDE_PAN_FRAGMENTS,
-        paramDump,
-        true
-    );
+async function planClipValues(discovery, sequence, options) {
+    const component = discovery.chain.getComponentAtIndex(discovery.componentIndex);
+    if (!component) {
+        throw new Error("Auto-Reframe-Komponente nicht mehr lesbar.");
+    }
 
     const targets = [];
-    targets.push(
-        await planParam(component, position.index, trackItem, sequence, options.timing)
-    );
-
-    if (options.fixScale) {
-        const scale = await resolveRequiredParam(
-            component, "Skalierung", SCALE_PARAM_NAMES, SCALE_FRAGMENTS, paramDump
-        );
+    for (let i = 0; i < discovery.paramIndexes.length; i++) {
         targets.push(
-            await planParam(component, scale.index, trackItem, sequence, options.timing)
+            await planParam(
+                component,
+                discovery.paramIndexes[i],
+                discovery.trackItem,
+                sequence,
+                options.timing
+            )
         );
     }
-
-    if (options.fixRotation) {
-        const rotation = await resolveRequiredParam(
-            component, "Drehung", ROTATION_PARAM_NAMES, ROTATION_FRAGMENTS, paramDump
-        );
-        targets.push(
-            await planParam(component, rotation.index, trackItem, sequence, options.timing)
-        );
-    }
-
-    const overridePanIndex = override.index;
 
     const validTargets = targets.filter((target) => target !== null);
     if (!validTargets.length) {
-        // planParam never returns null for a resolved parameter, so reaching
-        // here means an internal inconsistency rather than a user-facing case.
         throw new Error(
-            "Interner Fehler: kein schreibbarer Parameter trotz erfolgreicher Auflösung. " +
+            "Kein schreibbarer Parameter trotz erfolgreicher Auflösung. " +
                 "Vorhandene Parameter: " +
-                safeJson(paramDump)
+                safeJson(discovery.params)
         );
     }
 
-    return {
-        status: "planned",
-        clipName: clipName,
-        trackItem: trackItem,
-        chain: found.chain,
-        componentIndex: found.index,
-        overridePanIndex: overridePanIndex,
-        params: paramDump,
-        targets: validTargets
-    };
+    return validTargets;
 }
 
 // ---------------------------------------------------------------------------
@@ -1107,6 +1122,7 @@ async function runSmoothAutoFrame(rawOptions) {
         meta: {
             timestamp: new Date().toISOString(),
             pluginVersion: PLUGIN_VERSION,
+            diagnosticsVersion: DIAGNOSTICS_VERSION,
             options: {
                 timing: options.timing,
                 fixScale: options.fixScale,
@@ -1141,13 +1157,13 @@ async function runSmoothAutoFrame(rawOptions) {
         };
     }
 
-    // ---- Phase 1: read everything and build the plan (async) ----
+    // ---- Phase 1: discover effect and parameter indices (no values yet) ----
     const plans = [];
     for (let i = 0; i < trackItems.length; i++) {
         const trackItem = trackItems[i];
-        let planOrResult;
+        let discovery;
         try {
-            planOrResult = await buildClipPlan(trackItem, sequence, options);
+            discovery = await discoverClip(trackItem, options);
         } catch (error) {
             report.errors++;
             report.results.push({
@@ -1158,33 +1174,60 @@ async function runSmoothAutoFrame(rawOptions) {
             continue;
         }
 
-        if (planOrResult.status !== "planned") {
-            if (planOrResult.status === "error") {
+        if (discovery.status !== "discovered") {
+            if (discovery.status === "error") {
                 report.errors++;
             } else {
                 report.skipped++;
             }
-            report.results.push(planOrResult);
+            report.results.push(discovery);
             continue;
         }
 
-        plans.push(planOrResult);
+        plans.push(discovery);
     }
 
-    // ---- Dry run: report the plan without touching the project ----
+    /*
+     * ---- Dry run: report without touching the project ----
+     *
+     * With the override checkbox off, the editable parameters report zero
+     * keyframes — the generated path is not exposed on them yet. A dry run
+     * must not enable the checkbox, so the reference values it can show are
+     * limited in that state. This is stated explicitly rather than presenting
+     * possibly meaningless numbers as if they were final.
+     */
     if (options.dryRun) {
         for (let i = 0; i < plans.length; i++) {
             const plan = plans[i];
+            let targets = null;
+            let planError = null;
+            try {
+                targets = await planClipValues(plan, sequence, options);
+            } catch (error) {
+                planError = describeError(error);
+            }
+
             report.processed++;
             report.results.push({
                 clipName: plan.clipName,
                 status: "ok",
-                reason: "Dry-Run — es wurde nichts geschrieben.",
-                changes: plan.targets.map((target) => ({
-                    param: target.paramName,
-                    value: describeValue(target.value),
-                    keyframesBefore: target.keyframeCount
-                })),
+                reason:
+                    "Dry-Run — es wurde nichts geschrieben." +
+                    (plan.overrideActiveBefore === false
+                        ? ' Hinweis: "Erzeugten Pfad überschreiben" ist noch nicht aktiv. ' +
+                          "Auto Reframe gibt die Keyframes erst nach dem Aktivieren auf " +
+                          "den bearbeitbaren Parametern frei — der echte Lauf aktiviert " +
+                          "die Checkbox zuerst und liest die Werte danach."
+                        : ""),
+                overrideActiveBefore: plan.overrideActiveBefore,
+                changes: targets
+                    ? targets.map((target) => ({
+                          param: target.paramName,
+                          value: describeValue(target.value),
+                          keyframesBefore: target.keyframeCount
+                      }))
+                    : [],
+                planError: planError,
                 // Index layout of the effect, for diagnostics. Parameters can
                 // only be addressed by localized name or by index, so this is
                 // the one language-independent handle available.
@@ -1274,28 +1317,79 @@ async function runSmoothAutoFrame(rawOptions) {
         return report;
     }
 
-    // Verify the checkbox actually took effect — without it the value writes
-    // below would be silently discarded by the effect.
+    /*
+     * ---- Phase 2b: verify the checkbox, THEN read the reference values ----
+     *
+     * The order matters. With the checkbox off, Auto Reframe reports the
+     * editable parameters as non-keyframed with zero keyframes; the generated
+     * path is only exposed on them once the override is active. Values read
+     * before this point would be the wrong reference.
+     */
+    const stillPlanned = [];
     for (let i = 0; i < plans.length; i++) {
         const plan = plans[i];
-        if (plan.chainError) continue;
+        if (plan.chainError) {
+            report.errors++;
+            report.results.push({
+                clipName: plan.clipName,
+                status: "error",
+                reason: "Effektkette nicht mehr lesbar: " + plan.chainError
+            });
+            continue;
+        }
+
         try {
             const refreshed = await plan.trackItem.getComponentChain();
             if (refreshed) plan.chain = refreshed;
             const component = plan.chain.getComponentAtIndex(plan.componentIndex);
             const overrideParam = component ? component.getParam(plan.overridePanIndex) : null;
-            if (overrideParam) {
-                const current = normalizeReadValue(
-                    await overrideParam.getValueAtTime(plan.targets[0].referenceTime)
-                );
-                plan.overrideActive = current === true || current === 1;
+            if (!overrideParam) {
+                throw new Error("Override-Parameter nach dem Setzen nicht lesbar.");
             }
+
+            plan.overrideActive =
+                normalizeReadValue(await overrideParam.getStartValue()) === true;
+
+            if (!plan.overrideActive) {
+                report.errors++;
+                report.results.push({
+                    clipName: plan.clipName,
+                    status: "error",
+                    reason:
+                        'Die Checkbox "Erzeugten Pfad überschreiben" ließ sich nicht ' +
+                        "aktivieren — Auto Reframe würde jede Änderung verwerfen. " +
+                        "Es wurde nichts geschrieben. Parameter: " +
+                        safeJson(plan.params),
+                    params: plan.params
+                });
+                continue;
+            }
+
+            // Now that the override is active, the keyframes are visible.
+            plan.targets = await planClipValues(plan, sequence, options);
+            stillPlanned.push(plan);
         } catch (error) {
-            plan.overrideCheckError = describeError(error);
+            report.errors++;
+            report.results.push({
+                clipName: plan.clipName,
+                status: "error",
+                reason: describeError(error),
+                params: plan.params
+            });
         }
     }
 
-    // ---- Phase 2b: pin the values, in one atomic transaction ----
+    plans.length = 0;
+    for (let i = 0; i < stillPlanned.length; i++) plans.push(stillPlanned[i]);
+
+    if (!plans.length) {
+        report.notes.push(
+            "Kein Clip war nach dem Aktivieren der Checkbox beschreibbar."
+        );
+        return report;
+    }
+
+    // ---- Phase 2c: pin the values, in one atomic transaction ----
     let committed = false;
     let transactionError = null;
     // Problems detected while queuing actions. Collected instead of thrown:
@@ -1473,14 +1567,6 @@ async function runSmoothAutoFrame(rawOptions) {
         const changes = [];
         const problems = [];
 
-        if (plan.overrideCheckError) {
-            problems.push("Override-Status nicht prüfbar: " + plan.overrideCheckError);
-        } else if (plan.overrideActive === false) {
-            problems.push(
-                "Die Checkbox zum Überschreiben des erzeugten Pfads ist nach dem " +
-                    "Schreiben weiterhin nicht aktiv — Auto Reframe verwirft die Änderung."
-            );
-        }
 
         try {
             const refreshed = await plan.trackItem.getComponentChain();

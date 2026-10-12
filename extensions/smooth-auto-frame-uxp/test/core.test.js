@@ -318,10 +318,15 @@ function reset() { log.length = 0; }
         assert.strictEqual(r.processed, 0, "Erfolg gemeldet, obwohl nichts passiert ist!");
         assert.strictEqual(r.errors, 1, "kein Fehler gemeldet");
         const reason = r.results[0].reason;
-        assert.ok(reason.includes("nicht übernommen"), "Meldung: " + reason);
+        assert.ok(
+            reason.includes("nicht übernommen") || reason.includes("nicht aktivieren"),
+            "Meldung: " + reason
+        );
         assert.ok(reason.includes("Checkbox") || reason.includes("animiert"),
             "Meldung nennt die Ursache nicht: " + reason);
         assert.ok(reason.includes("Erzeugten Pfad"), "Parameter-Dump fehlt: " + reason);
+        assert.ok(reason.includes("nichts geschrieben") || r.processed === 0,
+            "unklar, ob geschrieben wurde: " + reason);
     });
 
     await t("Fehlende Override-Checkbox: Fehler statt stillem Weitermachen", async () => {
@@ -412,6 +417,50 @@ function reset() { log.length = 0; }
         assert.ok(reason.includes("Deckkraft") && reason.includes("Bewegung"),
             "Effektliste fehlt: " + reason);
         assert.ok(r.results[0].components, "components-Feld fehlt");
+    });
+
+    await t("REIHENFOLGE: Werte werden erst nach Aktivieren der Checkbox gelesen", async () => {
+        /*
+         * Exakt das in Premiere 26.3.2 beobachtete Verhalten: solange die
+         * Checkbox aus ist, meldet "Position anpassen" 0 Keyframes und
+         * timeVarying=false. Erst nach dem Aktivieren erscheinen die 3
+         * Keyframes. Wer vorher liest, bekommt den falschen Referenzwert.
+         */
+        const gate = { open: false };
+
+        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
+        const origOverrideSet = override.createSetValueAction.bind(override);
+        override.createSetValueAction = function (kf, safe) {
+            const action = origOverrideSet(kf, safe);
+            const origApply = action.apply;
+            action.apply = () => { origApply(); if (kf.value === true) gate.open = true; };
+            return action;
+        };
+
+        const position = new MockParam("Position anpassen", [
+            { t: S(1), v: new PointF(0.81, 0.5) },
+            { t: S(2), v: new PointF(0.85, 0.5) },
+            { t: S(3), v: new PointF(0.90, 0.5) }
+        ], new PointF(0.0, 0.0), true);
+        // Gesperrt: ohne offene Checkbox keine Keyframes, kein timeVarying.
+        // Mit offener Checkbox gilt der echte Zustand des Parameters.
+        const origTv = position.isTimeVarying.bind(position);
+        position.isTimeVarying = function () { return gate.open && origTv(); };
+        const origList = position.getKeyframeListAsTickTimes.bind(position);
+        position.getKeyframeListAsTickTimes = function () {
+            return gate.open ? origList() : [];
+        };
+
+        makeScenario([override, position], { clipName: "gated.mov" });
+
+        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
+        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
+        assert.strictEqual(r.processed, 1);
+        // Der erste Keyframe-Wert (0.81) ist nur sichtbar, wenn NACH dem
+        // Aktivieren gelesen wurde. Vorher waere der statische 0.0 gelesen worden.
+        assert.ok(position._static instanceof PointF, "kein PointF");
+        assert.strictEqual(position._static.x, 0.81,
+            "falscher Referenzwert -> zu frueh gelesen: " + position._static.x);
     });
 
     await t("Referenz 'end' nimmt den LETZTEN Keyframe-Wert", async () => {
