@@ -68,17 +68,25 @@ auf dieser Property mindestens einen Keyframe sehen. Ob das bei aktivem
 „Override Generated Pan" tatsächlich zutrifft, ließ sich ohne laufende
 Premiere-Instanz nicht entscheiden — daher sind beide Wege verfügbar.
 
-## Installation (Entwicklung)
+## Installation
+
+Die vollständige Anleitung von `git clone` bis zur Nutzung — inklusive
+`.ccx`-Paketierung und Verteilung auf Client-Rechner — steht in
+**[INSTALL.md](INSTALL.md)**.
+
+Kurzfassung für die Entwicklung:
 
 1. [UXP Developer Tool (UDT)](https://developer.adobe.com/photoshop/uxp/guides/devtool/)
-   installieren (über Creative Cloud Desktop).
-2. In UDT **Add Plugin** wählen und die `manifest.json` dieses Ordners laden.
-3. **Load** klicken. Das Panel erscheint in Premiere unter
-   **Fenster → UXP-Plug-ins → Smooth Auto Frame**.
+   über Creative Cloud Desktop installieren.
+2. In Premiere **Einstellungen → Plug-ins → „Enable developer mode"** aktivieren
+   und Premiere neu starten.
+3. In UDT **Add Plugin** wählen, die `manifest.json` dieses Ordners laden,
+   dann **Load** klicken.
+4. Panel öffnen: **Fenster → UXP-Plug-ins → Smooth Auto Frame**
 
-Für die Weitergabe an Dritte: über UDT paketieren (`.ccx`) und bei Bedarf über
-die [Adobe Developer Distribution](https://developer.adobe.com/developer-distribution/)
-veröffentlichen.
+Für die Weitergabe an Dritte wird das Plugin in UDT als `.ccx` paketiert. Eine
+digitale Signatur ist bei UXP **nicht** erforderlich, ein
+Marketplace-Listing ebenfalls nicht — Details in [INSTALL.md](INSTALL.md).
 
 ## Nutzung
 
@@ -204,6 +212,7 @@ braucht weder Netzwerk- noch Dateisystem-, Prozess- oder Clipboard-Zugriff.
 ```
 smooth-auto-frame-uxp/
 ├── manifest.json        # UXP-Manifest (v5, host premierepro >= 25.6.0)
+├── INSTALL.md           # Installation & Verteilung (clone -> .ccx -> Client)
 ├── index.html           # Panel-UI (Spectrum UXP Widgets, built-in)
 ├── main.js              # Entrypoint-Registrierung + UI-Logik
 ├── style.css
