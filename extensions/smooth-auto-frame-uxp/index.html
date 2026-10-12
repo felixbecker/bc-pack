@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="style.css" />
+    <script src="main.js"></script>
+</head>
+<body>
+    <div class="wrapper">
+        <sp-heading size="S">Smooth Auto Frame</sp-heading>
+        <sp-body size="XS" class="subtitle">
+            Entfernt unerwünschte Kamerabewegung, die Auto Reframe auf
+            statisch gefilmten Clips erzeugt. Wähle Clips in der Timeline aus.
+        </sp-body>
+        <sp-divider size="S"></sp-divider>
+
+        <div class="field">
+            <sp-label for="timingOption" size="S">Zu haltender Referenz-Frame</sp-label>
+            <sp-picker id="timingOption" size="S">
+                <sp-menu slot="options">
+                    <sp-menu-item value="start" selected>Anfang des Clips</sp-menu-item>
+                    <sp-menu-item value="middle">Mitte des Clips</sp-menu-item>
+                    <sp-menu-item value="end">Ende des Clips</sp-menu-item>
+                    <sp-menu-item value="playhead">Aktuelle Abspielposition</sp-menu-item>
+                    <sp-menu-item value="average">Mittelwert aller Keyframes</sp-menu-item>
+                </sp-menu>
+            </sp-picker>
+        </div>
+
+        <div class="field">
+            <sp-label size="S">Zusätzlich einfrieren</sp-label>
+            <sp-checkbox id="fixScale" size="S">Scale (Zoom)</sp-checkbox>
+            <sp-checkbox id="fixRotation" size="S">Rotation</sp-checkbox>
+        </div>
+
+        <div class="field">
+            <sp-label size="S">Ausführung</sp-label>
+            <sp-checkbox id="dryRun" size="S" checked>Dry-Run (nur Vorschau)</sp-checkbox>
+            <sp-checkbox id="keyframeMode" size="S">
+                Keyframe-Modus (Fallback)
+            </sp-checkbox>
+            <sp-body size="XS" class="hint">
+                Standard schreibt einen echten konstanten Wert ohne Keyframes.
+                Der Fallback setzt stattdessen zwei Hold-Keyframes.
+            </sp-body>
+        </div>
+
+        <sp-divider size="S"></sp-divider>
+
+        <div class="actions">
+            <sp-button id="runButton" variant="accent" size="S">Ausführen</sp-button>
+            <sp-button id="clearButton" variant="secondary" treatment="outline" size="S">
+                Log leeren
+            </sp-button>
+        </div>
+
+        <sp-body size="XS" id="statusBar" class="status"></sp-body>
+
+        <div id="summary" class="summary">
+            <span class="pill ok" id="summaryOk">Verarbeitet: 0</span>
+            <span class="pill skipped" id="summarySkipped">Übersprungen: 0</span>
+            <span class="pill error" id="summaryError">Fehler: 0</span>
+        </div>
+
+        <div id="log" class="log"></div>
+    </div>
+</body>
+</html>
