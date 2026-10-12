@@ -1669,5 +1669,10 @@ async function runSmoothAutoFrame(rawOptions) {
 
 module.exports = {
     runSmoothAutoFrame: runSmoothAutoFrame,
-    TIMING: TIMING
+    TIMING: TIMING,
+    // Exported so the panel can display which build is actually loaded. UXP
+    // caches required modules, so a Reload can leave stale code running — and
+    // without a visible marker that is indistinguishable from a working build.
+    PLUGIN_VERSION: PLUGIN_VERSION,
+    DIAGNOSTICS_VERSION: DIAGNOSTICS_VERSION
 };

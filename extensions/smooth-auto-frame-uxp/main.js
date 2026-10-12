@@ -9,7 +9,8 @@
  */
 
 const { entrypoints } = require("uxp");
-const { runSmoothAutoFrame } = require("./src/core.js");
+const core = require("./src/core.js");
+const { runSmoothAutoFrame } = core;
 
 entrypoints.setup({
     panels: {
@@ -42,6 +43,7 @@ function cacheElements() {
     el.summarySkipped = document.getElementById("summarySkipped");
     el.summaryError = document.getElementById("summaryError");
     el.log = document.getElementById("log");
+    el.buildInfo = document.getElementById("buildInfo");
 }
 
 /** Last report, kept so it can be copied or saved for diagnostics. */
@@ -303,8 +305,25 @@ function onClear() {
     setStatus("");
 }
 
+/**
+ * Shows which build is loaded.
+ *
+ * UXP caches required modules, so a Reload in UDT can leave stale code
+ * running. Without a visible marker that is indistinguishable from a working
+ * build — which cost several test cycles. If the number here does not match
+ * the expected one, the loaded code is old: remove and re-add the plugin in
+ * UDT, or restart Premiere.
+ */
+function showBuildInfo() {
+    if (!el.buildInfo) return;
+    el.buildInfo.textContent =
+        "Build " + (core.PLUGIN_VERSION || "?") +
+        " · Diagnose d" + (core.DIAGNOSTICS_VERSION || "?");
+}
+
 function init() {
     cacheElements();
+    showBuildInfo();
     el.runButton.addEventListener("click", onRun);
     el.clearButton.addEventListener("click", onClear);
     el.copyButton.addEventListener("click", onCopy);
