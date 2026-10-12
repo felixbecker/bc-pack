@@ -71,17 +71,43 @@ const AUTO_REFRAME_DISPLAY_NAMES = [
     "riquadratura automatica"
 ];
 
+/*
+ * Parameter identification.
+ *
+ * Unlike Component, `ComponentParam` exposes no matchName — only the
+ * LOCALIZED `displayName`. There is therefore no language-independent name to
+ * match on, which is a genuine gap in the API. Matching exact names alone is
+ * fragile: the German label for the override checkbox is "Erzeugten Pfad
+ * überschreiben", not the "Generierten Schwenk überschreiben" that was
+ * guessed here originally.
+ *
+ * Each parameter is therefore resolved in three stages:
+ *   1. exact match against known localized names,
+ *   2. substring match against language-spanning fragments,
+ *   3. failing both, the clip is reported as an error together with a dump of
+ *      all parameter names, so the lists can be corrected from real data
+ *      instead of guesses.
+ */
+
 const OVERRIDE_PAN_PARAM_NAMES = [
     "override generated pan",
     "override generated path",
     "overwrite generated path",
     "override generated pan/scan",
+    "erzeugten pfad überschreiben",
+    "generierten pfad überschreiben",
     "generierten schwenk überschreiben"
 ];
+const OVERRIDE_PAN_FRAGMENTS = ["überschreib", "uberschreib", "override", "overwrite"];
 
 const POSITION_PARAM_NAMES = ["adjust position", "position", "position anpassen"];
+const POSITION_FRAGMENTS = ["position"];
+
 const SCALE_PARAM_NAMES = ["adjust scale", "scale", "skalierung", "skalierung anpassen"];
+const SCALE_FRAGMENTS = ["scale", "skalier", "zoom"];
+
 const ROTATION_PARAM_NAMES = ["adjust rotation", "rotation", "drehung"];
+const ROTATION_FRAGMENTS = ["rotation", "drehung", "rotat"];
 
 /** Temporal interpolation mode: hold (step) — see Premiere scripting enum. */
 const INTERP_MODE_HOLD = 4;
@@ -430,16 +456,28 @@ function getKeyframeTimes(param) {
 
 /**
  * Locates the Auto Reframe component on a track item.
- * @returns {Promise<{chain: object, index: number, component: object}|null>}
+ *
+ * Returns the component when found, otherwise a list of every component that
+ * WAS present (matchName + displayName). Without that list a clip with an
+ * Auto Reframe effect under an unrecognized name would be indistinguishable
+ * from a clip that genuinely has no Auto Reframe — the report must be able to
+ * tell those two apart.
+ *
+ * @returns {Promise<{found: boolean, chain, index, component, components}>}
  */
 async function findAutoReframeComponent(trackItem) {
     const chain = await trackItem.getComponentChain();
-    if (!chain) return null;
+    if (!chain) return { found: false, components: [] };
 
+    const components = [];
     const count = chain.getComponentCount();
+
     for (let i = 0; i < count; i++) {
         const component = chain.getComponentAtIndex(i);
-        if (!component) continue;
+        if (!component) {
+            components.push({ index: i, note: "nicht lesbar" });
+            continue;
+        }
 
         let matchName = "";
         let displayName = "";
@@ -454,30 +492,186 @@ async function findAutoReframeComponent(trackItem) {
             displayName = "";
         }
 
+        components.push({ index: i, matchName: matchName, name: displayName });
+
         if (
             containsFragment(matchName, AUTO_REFRAME_MATCHNAME_FRAGMENTS) ||
             containsFragment(displayName, AUTO_REFRAME_MATCHNAME_FRAGMENTS) ||
             nameMatches(displayName, AUTO_REFRAME_DISPLAY_NAMES)
         ) {
-            return { chain: chain, index: i, component: component };
+            return {
+                found: true,
+                chain: chain,
+                index: i,
+                component: component,
+                components: components
+            };
         }
     }
-    return null;
+
+    return { found: false, chain: chain, components: components };
 }
 
 /**
- * Finds a parameter index on a component by display name.
+ * Finds a parameter index on a component.
  * `ComponentParam.displayName` is a synchronous property.
+ *
+ * Tries exact localized names first, then falls back to substring fragments
+ * so a label we have not seen before ("Erzeugten Pfad überschreiben") still
+ * resolves. Returns -1 when nothing matches.
  */
-function findParamIndex(component, candidateNames) {
+function findParamIndex(component, candidateNames, fragments) {
     const count = component.getParamCount();
+
     for (let i = 0; i < count; i++) {
         const param = component.getParam(i);
         if (param && nameMatches(param.displayName, candidateNames)) {
             return i;
         }
     }
+
+    if (fragments && fragments.length) {
+        for (let i = 0; i < count; i++) {
+            const param = component.getParam(i);
+            if (!param) continue;
+            const normalized = normalizeName(param.displayName);
+            for (let f = 0; f < fragments.length; f++) {
+                if (normalized.indexOf(fragments[f]) !== -1) return i;
+            }
+        }
+    }
+
     return -1;
+}
+
+/**
+ * Resolves a REQUIRED parameter, or throws with full diagnostics.
+ *
+ * Name-based lookups against localized `displayName` strings are inherently
+ * unreliable — there is no matchName for parameters. A lookup that silently
+ * returns "not found" and lets the caller continue is therefore the single
+ * most dangerous pattern in this plugin: that is exactly how an earlier
+ * version skipped the override checkbox and then reported success.
+ *
+ * Every name-based lookup must thus either succeed or abort loudly, and the
+ * error has to carry enough context to correct the name lists from real data.
+ *
+ * @param {string} label   human-readable purpose, e.g. "Position"
+ * @param {boolean} [expectBoolean]  verify the parameter reads as a boolean —
+ *        guards against matching a numeric parameter by accident
+ */
+async function resolveRequiredParam(
+    component,
+    label,
+    candidateNames,
+    fragments,
+    paramDump,
+    expectBoolean
+) {
+    const index = findParamIndex(component, candidateNames, fragments);
+
+    if (index < 0) {
+        throw new Error(
+            'Parameter "' +
+                label +
+                '" wurde im Auto-Reframe-Effekt nicht gefunden. Die UXP-API ' +
+                "bietet für Parameter nur den lokalisierten Anzeigenamen, daher " +
+                "kann die Suche bei einer unbekannten Sprachversion fehlschlagen. " +
+                "Vorhandene Parameter: " +
+                safeJson(paramDump)
+        );
+    }
+
+    const param = component.getParam(index);
+    if (!param) {
+        throw new Error(
+            'Parameter "' + label + '" (Index ' + index + ") ist nicht lesbar."
+        );
+    }
+
+    // "Found" is not enough — the parameter must also yield a usable value.
+    if (expectBoolean) {
+        let probe;
+        try {
+            probe = normalizeReadValue(await param.getStartValue());
+        } catch {
+            probe = undefined;
+        }
+        if (probe === undefined || probe === null) {
+            try {
+                probe = normalizeReadValue(
+                    await param.getValueAtTime(TickTimeZero())
+                );
+            } catch {
+                probe = undefined;
+            }
+        }
+        if (typeof probe !== "boolean") {
+            throw new Error(
+                'Der als "' +
+                    label +
+                    '" erkannte Parameter "' +
+                    param.displayName +
+                    '" liefert keinen Wahrheitswert, sondern ' +
+                    safeJson(probe) +
+                    ". Vermutlich wurde der falsche Parameter getroffen. " +
+                    "Vorhandene Parameter: " +
+                    safeJson(paramDump)
+            );
+        }
+    }
+
+    return { index: index, param: param, name: param.displayName };
+}
+
+/** TickTime zero, used for probing a parameter's value. */
+function TickTimeZero() {
+    return ppro.TickTime.createWithSeconds(0);
+}
+
+/**
+ * Dumps every parameter of a component: index, display name, whether it is
+ * keyframed and how many keyframes it has.
+ *
+ * This exists because parameters can only be addressed by localized name or
+ * by index. The dump makes the real index layout visible, which is the only
+ * language-independent handle the API offers.
+ */
+function describeComponentParams(component) {
+    const params = [];
+    let count = 0;
+    try {
+        count = component.getParamCount();
+    } catch {
+        return params;
+    }
+
+    for (let i = 0; i < count; i++) {
+        let entry = { index: i };
+        try {
+            const param = component.getParam(i);
+            if (!param) {
+                entry.note = "nicht lesbar";
+                params.push(entry);
+                continue;
+            }
+            entry.name = param.displayName;
+            try {
+                entry.timeVarying = param.isTimeVarying();
+            } catch {
+                entry.timeVarying = null;
+            }
+            try {
+                entry.keyframes = getKeyframeTimes(param).length;
+            } catch {
+                entry.keyframes = null;
+            }
+        } catch (error) {
+            entry.note = describeError(error);
+        }
+        params.push(entry);
+    }
+    return params;
 }
 
 /**
@@ -656,56 +850,105 @@ async function buildClipPlan(trackItem, sequence, options) {
     }
 
     const found = await findAutoReframeComponent(trackItem);
-    if (!found) {
+    if (!found.found) {
         return {
             status: "skipped",
             clipName: clipName,
-            reason: "Kein Auto-Reframe-Effekt auf diesem Clip gefunden."
+            reason:
+                "Kein Auto-Reframe-Effekt auf diesem Clip gefunden. " +
+                "Vorhandene Effekte: " +
+                safeJson(found.components),
+            // Lets an Auto Reframe effect under an unknown name be told apart
+            // from a clip that genuinely has none.
+            components: found.components
         };
     }
 
     const component = found.component;
-    const positionIndex = findParamIndex(component, POSITION_PARAM_NAMES);
-    if (positionIndex < 0) {
+    const paramDump = describeComponentParams(component);
+
+    try {
+        return await planClipTargets(
+            trackItem, sequence, options, clipName, found, component, paramDump
+        );
+    } catch (error) {
+        // A failed lookup or an unusable value aborts this clip loudly, with
+        // the full parameter layout attached so the cause is visible.
         return {
-            status: "skipped",
+            status: "error",
             clipName: clipName,
-            reason: "Auto Reframe gefunden, aber kein Position-Parameter auflösbar."
+            reason: describeError(error),
+            params: paramDump,
+            components: found.components
         };
     }
+}
 
-    const overridePanIndex = findParamIndex(component, OVERRIDE_PAN_PARAM_NAMES);
+/**
+ * Resolves every required parameter and builds the write plan.
+ * Throws (never returns "not found") so the caller reports a hard error.
+ */
+async function planClipTargets(
+    trackItem, sequence, options, clipName, found, component, paramDump
+) {
+    /*
+     * Every parameter below is REQUIRED and resolved via resolveRequiredParam,
+     * which throws with diagnostics rather than returning "not found".
+     *
+     * Scale and Rotation are required only when the user asked for them — but
+     * then they are genuinely required: silently not freezing a parameter the
+     * user explicitly ticked, and still reporting success, is the same class of
+     * bug as the missing override checkbox.
+     */
+    const position = await resolveRequiredParam(
+        component, "Position", POSITION_PARAM_NAMES, POSITION_FRAGMENTS, paramDump
+    );
+
+    // Verified to read as a boolean, so a numeric parameter cannot be mistaken
+    // for the checkbox.
+    const override = await resolveRequiredParam(
+        component,
+        "Erzeugten Pfad überschreiben",
+        OVERRIDE_PAN_PARAM_NAMES,
+        OVERRIDE_PAN_FRAGMENTS,
+        paramDump,
+        true
+    );
+
     const targets = [];
-
     targets.push(
-        await planParam(component, positionIndex, trackItem, sequence, options.timing)
+        await planParam(component, position.index, trackItem, sequence, options.timing)
     );
 
     if (options.fixScale) {
-        const scaleIndex = findParamIndex(component, SCALE_PARAM_NAMES);
-        if (scaleIndex >= 0) {
-            targets.push(
-                await planParam(component, scaleIndex, trackItem, sequence, options.timing)
-            );
-        }
+        const scale = await resolveRequiredParam(
+            component, "Skalierung", SCALE_PARAM_NAMES, SCALE_FRAGMENTS, paramDump
+        );
+        targets.push(
+            await planParam(component, scale.index, trackItem, sequence, options.timing)
+        );
     }
 
     if (options.fixRotation) {
-        const rotationIndex = findParamIndex(component, ROTATION_PARAM_NAMES);
-        if (rotationIndex >= 0) {
-            targets.push(
-                await planParam(component, rotationIndex, trackItem, sequence, options.timing)
-            );
-        }
+        const rotation = await resolveRequiredParam(
+            component, "Drehung", ROTATION_PARAM_NAMES, ROTATION_FRAGMENTS, paramDump
+        );
+        targets.push(
+            await planParam(component, rotation.index, trackItem, sequence, options.timing)
+        );
     }
+
+    const overridePanIndex = override.index;
 
     const validTargets = targets.filter((target) => target !== null);
     if (!validTargets.length) {
-        return {
-            status: "skipped",
-            clipName: clipName,
-            reason: "Keine schreibbaren Parameter gefunden."
-        };
+        // planParam never returns null for a resolved parameter, so reaching
+        // here means an internal inconsistency rather than a user-facing case.
+        throw new Error(
+            "Interner Fehler: kein schreibbarer Parameter trotz erfolgreicher Auflösung. " +
+                "Vorhandene Parameter: " +
+                safeJson(paramDump)
+        );
     }
 
     return {
@@ -715,6 +958,7 @@ async function buildClipPlan(trackItem, sequence, options) {
         chain: found.chain,
         componentIndex: found.index,
         overridePanIndex: overridePanIndex,
+        params: paramDump,
         targets: validTargets
     };
 }
@@ -833,7 +1077,11 @@ async function runSmoothAutoFrame(rawOptions) {
         }
 
         if (planOrResult.status !== "planned") {
-            report.skipped++;
+            if (planOrResult.status === "error") {
+                report.errors++;
+            } else {
+                report.skipped++;
+            }
             report.results.push(planOrResult);
             continue;
         }
@@ -854,7 +1102,11 @@ async function runSmoothAutoFrame(rawOptions) {
                     param: target.paramName,
                     value: describeValue(target.value),
                     keyframesBefore: target.keyframeCount
-                }))
+                })),
+                // Index layout of the effect, for diagnostics. Parameters can
+                // only be addressed by localized name or by index, so this is
+                // the one language-independent handle available.
+                params: plan.params
             });
         }
         if (!plans.length && !report.results.length) {
@@ -889,7 +1141,79 @@ async function runSmoothAutoFrame(rawOptions) {
         }
     }
 
-    // ---- Phase 2: one atomic, undoable transaction (synchronous) ----
+    // ---- Phase 2a: enable the override checkbox, in its own transaction ----
+    /*
+     * This deliberately runs BEFORE the value writes rather than in the same
+     * compound action. Auto Reframe drives the position from its own motion
+     * analysis; the parameter only becomes writable once "override generated
+     * path" is committed. Inside a single compound action the intermediate
+     * state is not yet visible to the following actions, which is why an
+     * earlier version appeared to succeed while changing nothing.
+     *
+     * The cost is that a run is two undo steps instead of one. That is the
+     * right trade: correctness over undo convenience.
+     */
+    let overrideError = null;
+    project.lockedAccess(() => {
+        try {
+            project.executeTransaction((compoundAction) => {
+                for (let i = 0; i < plans.length; i++) {
+                    const plan = plans[i];
+                    if (plan.chainError) continue;
+
+                    const component = plan.chain.getComponentAtIndex(plan.componentIndex);
+                    if (!component) continue;
+
+                    const overrideParam = component.getParam(plan.overridePanIndex);
+                    if (!overrideParam) continue;
+
+                    const keyframe = overrideParam.createKeyframe(true);
+                    compoundAction.addAction(
+                        overrideParam.createSetValueAction(keyframe, true)
+                    );
+                }
+            }, "Smooth Auto Frame — Pfad überschreiben");
+        } catch (error) {
+            overrideError = error;
+        }
+    });
+
+    if (overrideError) {
+        report.errors += plans.length;
+        for (let i = 0; i < plans.length; i++) {
+            report.results.push({
+                clipName: plans[i].clipName,
+                status: "error",
+                reason:
+                    "Checkbox zum Überschreiben konnte nicht gesetzt werden: " +
+                    describeError(overrideError)
+            });
+        }
+        return report;
+    }
+
+    // Verify the checkbox actually took effect — without it the value writes
+    // below would be silently discarded by the effect.
+    for (let i = 0; i < plans.length; i++) {
+        const plan = plans[i];
+        if (plan.chainError) continue;
+        try {
+            const refreshed = await plan.trackItem.getComponentChain();
+            if (refreshed) plan.chain = refreshed;
+            const component = plan.chain.getComponentAtIndex(plan.componentIndex);
+            const overrideParam = component ? component.getParam(plan.overridePanIndex) : null;
+            if (overrideParam) {
+                const current = normalizeReadValue(
+                    await overrideParam.getValueAtTime(plan.targets[0].referenceTime)
+                );
+                plan.overrideActive = current === true || current === 1;
+            }
+        } catch (error) {
+            plan.overrideCheckError = describeError(error);
+        }
+    }
+
+    // ---- Phase 2b: pin the values, in one atomic transaction ----
     let committed = false;
     let transactionError = null;
     // Problems detected while queuing actions. Collected instead of thrown:
@@ -926,19 +1250,8 @@ async function runSmoothAutoFrame(rawOptions) {
                         continue;
                     }
 
-                    // Step 1: enable "Override Generated Pan" so the generated
-                    // path becomes editable (first step of the manual workflow).
-                    if (plan.overridePanIndex >= 0) {
-                        const overrideParam = component.getParam(plan.overridePanIndex);
-                        if (overrideParam) {
-                            const overrideKeyframe = overrideParam.createKeyframe(true);
-                            compoundAction.addAction(
-                                overrideParam.createSetValueAction(overrideKeyframe, true)
-                            );
-                        }
-                    }
-
-                    // Step 2: pin each target parameter to its reference value.
+                    // The override checkbox was already committed in phase 2a;
+                    // here only the values are written.
                     for (let t = 0; t < plan.targets.length; t++) {
                         const target = plan.targets[t];
                         const param = component.getParam(target.paramIndex);
@@ -1063,28 +1376,124 @@ async function runSmoothAutoFrame(rawOptions) {
         });
     }
 
+    /*
+     * ---- Phase 3: verify what actually happened ----
+     *
+     * A committed transaction does NOT mean the effect accepted the change.
+     * An earlier version reported "pinned to a constant value" while the
+     * keyframes were still there and the override checkbox was still off.
+     * Success is therefore no longer assumed — it is read back and compared.
+     */
     for (let i = 0; i < plans.length; i++) {
         const plan = plans[i];
         if (failedClipNames[plan.clipName]) continue;
+
+        const changes = [];
+        const problems = [];
+
+        if (plan.overrideCheckError) {
+            problems.push("Override-Status nicht prüfbar: " + plan.overrideCheckError);
+        } else if (plan.overrideActive === false) {
+            problems.push(
+                "Die Checkbox zum Überschreiben des erzeugten Pfads ist nach dem " +
+                    "Schreiben weiterhin nicht aktiv — Auto Reframe verwirft die Änderung."
+            );
+        }
+
+        try {
+            const refreshed = await plan.trackItem.getComponentChain();
+            if (refreshed) plan.chain = refreshed;
+            const component = plan.chain.getComponentAtIndex(plan.componentIndex);
+
+            for (let t = 0; t < plan.targets.length; t++) {
+                const target = plan.targets[t];
+                const param = component ? component.getParam(target.paramIndex) : null;
+                if (!param) {
+                    problems.push(
+                        'Parameter "' + target.paramName + '" nach dem Schreiben nicht lesbar.'
+                    );
+                    continue;
+                }
+
+                const keyframesAfter = getKeyframeTimes(param).length;
+                let stillVarying = null;
+                try {
+                    stillVarying = param.isTimeVarying();
+                } catch {
+                    stillVarying = null;
+                }
+
+                const expectedKeyframes = options.keyframeMode
+                    ? target.writeDistinctBounds
+                        ? 2
+                        : 1
+                    : 0;
+
+                if (keyframesAfter !== expectedKeyframes) {
+                    problems.push(
+                        'Parameter "' +
+                            target.paramName +
+                            '": erwartet ' +
+                            expectedKeyframes +
+                            " Keyframes, tatsächlich " +
+                            keyframesAfter +
+                            " (vorher " +
+                            target.keyframeCount +
+                            ")."
+                    );
+                }
+
+                if (!options.keyframeMode && stillVarying === true) {
+                    problems.push(
+                        'Parameter "' +
+                            target.paramName +
+                            '" ist weiterhin animiert (Stoppuhr an).'
+                    );
+                }
+
+                changes.push({
+                    param: target.paramName,
+                    value: describeValue(target.value),
+                    keyframesBefore: target.keyframeCount,
+                    keyframesAfter: keyframesAfter,
+                    timeVaryingAfter: stillVarying
+                });
+            }
+        } catch (error) {
+            problems.push("Nachprüfung fehlgeschlagen: " + describeError(error));
+        }
+
+        if (problems.length) {
+            report.errors++;
+            report.results.push({
+                clipName: plan.clipName,
+                status: "error",
+                reason:
+                    "Schreiben wurde nicht übernommen. " +
+                    problems.join(" ") +
+                    " Parameter des Effekts: " +
+                    safeJson(plan.params),
+                changes: changes,
+                params: plan.params
+            });
+            continue;
+        }
 
         report.processed++;
         report.results.push({
             clipName: plan.clipName,
             status: "ok",
             reason: options.keyframeMode
-                ? "Auf Hold-Keyframes reduziert."
-                : "Auf konstanten Wert fixiert (keine Keyframes).",
-            changes: plan.targets.map((target) => ({
-                param: target.paramName,
-                value: describeValue(target.value),
-                keyframesBefore: target.keyframeCount
-            }))
+                ? "Auf Hold-Keyframes reduziert und nachgeprüft."
+                : "Auf konstanten Wert fixiert und nachgeprüft (keine Keyframes mehr).",
+            changes: changes
         });
     }
 
     if (report.processed > 0) {
         report.notes.push(
-            "Alle Änderungen sind ein einzelner Undo-Schritt (Cmd/Ctrl+Z)."
+            "Ein Lauf besteht aus zwei Undo-Schritten: zuerst die Werte, " +
+                "dann die Override-Checkbox."
         );
     }
     return report;
