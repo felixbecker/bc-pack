@@ -298,24 +298,26 @@ test("intrinsic components are recognised", function () {
     assert.equal(chainUtil.isIntrinsicMatchName("AE.ADBE Geometry2"), false);
 });
 
-test("with intrinsics first, our effects are appended", function () {
+test("our effects are inserted in front of the user effects", function () {
+    // The chain runs opposite to the render order, so the lowest standard
+    // index renders LAST — that is where we have to go.
     const infos = [
         info(0, "AE.ADBE Opacity"),
         info(1, "AE.ADBE Motion"),
         info(2, "AE.ADBE AutoReframe"),
         info(3, "PR.ADBE Lumetri")
     ];
-    assert.equal(chainUtil.computeInsertionIndex(infos), 4);
+    assert.equal(chainUtil.computeInsertionIndex(infos), 2);
 });
 
-test("with intrinsics last, our effects go in front of them", function () {
+test("with intrinsics last, the first user effect is still the target", function () {
     const infos = [
         info(0, "AE.ADBE AutoReframe"),
         info(1, "PR.ADBE Lumetri"),
         info(2, "AE.ADBE Motion"),
         info(3, "AE.ADBE Opacity")
     ];
-    assert.equal(chainUtil.computeInsertionIndex(infos), 2);
+    assert.equal(chainUtil.computeInsertionIndex(infos), 0);
 });
 
 test("a chain of only intrinsics appends", function () {
@@ -327,17 +329,17 @@ test("an empty chain inserts at zero", function () {
     assert.equal(chainUtil.computeInsertionIndex([]), 0);
 });
 
-test("our own pair is detected at the end of the standard effects", function () {
+test("our own pair is detected as Crop followed by Transform", function () {
     const infos = [
         info(0, "AE.ADBE Opacity"),
         info(1, "AE.ADBE Motion"),
-        info(2, "PR.ADBE Lumetri"),
+        info(2, "AE.ADBE AECrop"),
         info(3, "AE.ADBE Geometry2"),
-        info(4, "AE.ADBE AECrop")
+        info(4, "PR.ADBE Lumetri")
     ];
     assert.deepEqual(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE AECrop"), {
         transformIndex: 3,
-        cropIndex: 4
+        cropIndex: 2
     });
 });
 
@@ -353,13 +355,13 @@ test("a foreign crop alone is not mistaken for our pair", function () {
 test("the wrong order is not mistaken for our pair", function () {
     const infos = [
         info(0, "AE.ADBE Motion"),
-        info(1, "AE.ADBE AECrop"),
-        info(2, "AE.ADBE Geometry2")
+        info(1, "AE.ADBE Geometry2"),
+        info(2, "AE.ADBE AECrop")
     ];
     assert.equal(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE AECrop"), null);
 });
 
-test("our pair is still found when a foreign crop precedes it", function () {
+test("our pair is still found when a foreign crop follows it", function () {
     const infos = [
         info(0, "AE.ADBE Motion"),
         info(1, "AE.ADBE AECrop"),
@@ -368,7 +370,7 @@ test("our pair is still found when a foreign crop precedes it", function () {
     ];
     assert.deepEqual(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE AECrop"), {
         transformIndex: 2,
-        cropIndex: 3
+        cropIndex: 1
     });
 });
 
@@ -461,31 +463,35 @@ test("the reason a Motion effect was unreadable reaches the message", function (
 // ---------------------------------------------------------------------------
 
 test("our pair is still found when an effect was added afterwards", function () {
-    // Everyday workflow: build the split screen, then grade the clip.
+    // Everyday workflow: build the split screen, then grade the clip. A newly
+    // applied effect renders last, so it lands at the low end of the chain and
+    // pushes our pair up — which must not stop us from recognising it.
     const infos = [
         info(0, "AE.ADBE Opacity"),
         info(1, "AE.ADBE Motion"),
-        info(2, "AE.ADBE Geometry2"),
+        info(2, "PR.ADBE Lumetri"),
         info(3, "AE.ADBE AECrop"),
-        info(4, "PR.ADBE Lumetri")
+        info(4, "AE.ADBE Geometry2")
     ];
     assert.deepEqual(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE AECrop"), {
-        transformIndex: 2,
+        transformIndex: 4,
         cropIndex: 3
     });
 });
 
-test("with two stacked pairs the last one is addressed", function () {
+test("with two stacked pairs the one rendering last is addressed", function () {
+    // Lower index renders later, so the first pair in the chain is the
+    // operative one.
     const infos = [
         info(0, "AE.ADBE Motion"),
-        info(1, "AE.ADBE Geometry2"),
-        info(2, "AE.ADBE AECrop"),
-        info(3, "AE.ADBE Geometry2"),
-        info(4, "AE.ADBE AECrop")
+        info(1, "AE.ADBE AECrop"),
+        info(2, "AE.ADBE Geometry2"),
+        info(3, "AE.ADBE AECrop"),
+        info(4, "AE.ADBE Geometry2")
     ];
     assert.deepEqual(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE AECrop"), {
-        transformIndex: 3,
-        cropIndex: 4
+        transformIndex: 2,
+        cropIndex: 1
     });
 });
 

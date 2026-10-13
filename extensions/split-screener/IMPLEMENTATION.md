@@ -24,9 +24,14 @@ die Umsetzung so aussieht und nicht anders. Die Nutzungsanleitung steht im
 Premiere rendert einen Clip als Kette: zuerst die Standard-Effekte in ihrer
 Reihenfolge, danach die intrinsischen Effekte „Bewegung" und „Deckkraft".
 
-Das Plugin hängt pro Clip **zwei eigene Standard-Effekte ans Ende** dieser
-Kette: ein **Transformieren**, das das Bild in seine Hälfte schiebt, und ein
+Das Plugin gibt jedem Clip **zwei eigene Standard-Effekte, die als letzte
+rendern**: ein **Transformieren**, das das Bild in seine Hälfte schiebt, und ein
 **Zuschneiden**, das diese Hälfte herausschneidet.
+
+Achtung bei der Umsetzung: die Component-Chain der API läuft **gegenläufig zur
+Render-Reihenfolge**. Um zuletzt zu rendern, müssen die Effekte an den *Anfang*
+des Standard-Blocks eingefügt werden, und zwar als Zuschneiden vor
+Transformieren. Siehe [Abschnitt 5](#phase-2-transaktion-1-einfügen).
 
 Weil beide Effekte hinter allem sitzen, was der Nutzer angelegt hat, ist alles
 Vorherige für das Plugin einfach „der aktuelle Look". Auto Reframe, Lumetri
@@ -302,12 +307,25 @@ Audio-Elemente in der Auswahl werden still ignoriert und im Report als
 müssen also vor der Transaktion entstehen. Eingefügt werden sie am berechneten
 Index: Transformieren an `index`, Zuschneiden an `index + 1`.
 
-Der Index kommt aus `chain.computeInsertionIndex()`. Erwartet wird, dass
-Premiere die intrinsischen Komponenten am Anfang der Kette führt; dann ist
-Anhängen richtig. Liegt eine Standard-Komponente vor einer intrinsischen, sind
-die Intrinsics ein Block am Ende und wir fügen davor ein. Besteht die Kette nur
-aus Intrinsics, sind beide Anordnungen nicht unterscheidbar und es wird
-angehängt.
+Der Index kommt aus `chain.computeInsertionIndex()` und ist der Index der
+**ersten Nicht-Intrinsic-Komponente**. Beide Effekte gehen auf **denselben**
+Index, Transformieren zuerst — die zweite Einfügung schiebt es eine Position
+hoch, sodass die Kette `[… Zuschneiden, Transformieren, Nutzer-Effekte]` lautet.
+
+Das ist gemessen, nicht angenommen. In Premiere 26.3.2 zeigte ein Clip mit der
+Kette
+
+```
+[0] Deckkraft  [1] Bewegung  [2] Auto Reframe  [3] Transformieren  [4] Zuschneiden
+```
+
+in den Effekteinstellungen — und das ist die Render-Reihenfolge, oben zuerst —
+die Folge `Zuschneiden(4) → Transformieren(3) → Auto Reframe(2)`. **Ein höherer
+Chain-Index rendert früher.** Die erste Fassung des Plugins hat angehängt und
+landete damit *vor* Auto Reframe; Auto Reframe hat die bereits platzierten
+Hälften anschließend neu eingerahmt und aus dem Bild geschoben. Im Preview war
+nichts mehr zu sehen, während Log und Nachkontrolle grün meldeten — die Werte
+waren ja korrekt geschrieben, nur an der falschen Stelle in der Kette.
 
 Danach werden die Ketten **neu gelesen**, damit die Komponenten adressiert
 werden, die wirklich in der Kette stehen — nicht die Handles, die wir erzeugt
@@ -552,10 +570,34 @@ die Testsimulation der Render-Pipeline gefunden, nicht durch Nachdenken.
 
 ### Auto-reframte Clips
 
-Brauchen **keinen** Sonderfall. Auto Reframe ist ein Standard-Effekt, läuft also
-vor uns, und sein Ergebnis ist für uns der aktuelle Look, von dem wir die Mitte
-nehmen. Pannt Auto Reframe, wandert das Motiv innerhalb seiner Hälfte — in der
-Regel gewollt; wenn nicht, ist das die Aufgabe von `smooth-auto-frame-uxp`.
+Brauchen keinen eigenen Rechenweg: Auto Reframe ist ein Standard-Effekt, rendert
+vor uns, und sein Ergebnis ist der aktuelle Look, von dem wir die Mitte nehmen.
+Pannt Auto Reframe, wandert das Motiv innerhalb seiner Hälfte — in der Regel
+gewollt; wenn nicht, ist das die Aufgabe von `smooth-auto-frame-uxp`.
+
+**Aber: Premiere schaltet den Bewegungs-Effekt ab, solange Auto Reframe
+angewendet ist.** Die Effekteinstellungen sagen es wörtlich: „Bewegung
+(Deaktiviert, wenn Auto Reframe angewendet ist)". Die Werte der Bewegung sind
+dann wirkungslos, und es wäre in beide Richtungen falsch, sie zu benutzen: eine
+Kompensation würde ins Leere rechnen, und eine übriggebliebene Drehung oder ein
+Keyframe würde den Clip grundlos ablehnen. Das Plugin erkennt Auto Reframe in
+der Kette, behandelt die Bewegung dann als neutral, überspringt die
+Bewegungs-Prüfungen und schreibt es in den Report.
+
+### Der Koordinatenraum ist der Quellclip
+
+Der Ankerpunkt unseres Transformieren-Effekts liest sich als `(0,5; 0,5)` und
+wird in den Effekteinstellungen als `960 / 540` angezeigt — also die Mitte eines
+**1920×1080**-Frames, während die Sequenz 1080×1080 ist. Die Effekte arbeiten im
+Frame des Quellclips, nicht in dem der Sequenz. Die Anforderung
+„Quellauflösung = Sequenzauflösung" trifft für den Hauptanwendungsfall also gar
+nicht zu: 16:9-Material in einer 1:1-Sequenz ist der Grund, warum Auto Reframe
+überhaupt im Spiel ist.
+
+Folgenlos bleibt das nur, weil sowohl der Positionsversatz als auch der
+Beschnitt in **Bruchteilen** des Frames rechnen und damit maßstabsfrei sind. Die
+Annahme war falsch, die Rechnung ist trotzdem richtig — verlassen sollte man
+sich darauf nicht.
 
 ### Die Bewegung hat ihren eigenen Beschnitt
 

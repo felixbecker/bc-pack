@@ -287,6 +287,37 @@ class MockChain {
             return c.matchName;
         });
     }
+
+    /**
+     * Match names of the standard components in RENDER order, top of Effect
+     * Controls first.
+     *
+     * The chain runs opposite to the render order — measured in Premiere
+     * 26.3.2, where a chain of [Opacity, Motion, AutoReframe, Transform, Crop]
+     * showed as Crop → Transform → AutoReframe in Effect Controls. Modelling
+     * that here is the whole point: the first version of this plugin appended
+     * its effects to the chain, which put them *before* Auto Reframe in render
+     * order, and Auto Reframe then reframed the already-placed halves out of
+     * the picture. A mock that only knows the array order cannot see that
+     * mistake.
+     */
+    renderOrder() {
+        const intrinsic = [
+            "ae.adbe opacity",
+            "ae.adbe motion",
+            "ae.adbe time remapping",
+            "ae.adbe volume",
+            "ae.adbe panner"
+        ];
+        return this._visible()
+            .filter(function (c) {
+                return intrinsic.indexOf(c.matchName.toLowerCase()) === -1;
+            })
+            .reverse()
+            .map(function (c) {
+                return c.matchName;
+            });
+    }
 }
 
 class MockTrackItem {
@@ -590,7 +621,8 @@ function makeClip(options) {
     if (opts.withOwnPair) {
         ownTransform = makeTransformComponent(opts.ownPairOptions);
         ownCrop = makeCropComponent(opts.ownPairOptions);
-        standard.push(ownTransform, ownCrop);
+        // Chain order is Crop then Transform — it renders the other way round.
+        standard.push(ownCrop, ownTransform);
     }
 
     if (opts.effectsAfter) standard.push.apply(standard, opts.effectsAfter);
@@ -692,15 +724,20 @@ function makeRealAutoReframeComponent(options) {
 function makeRealClip(options) {
     const opts = options || {};
 
-    const chain = new MockChain([
+    const components = [
         new MockComponent("AE.ADBE Opacity", "Deckkraft", [
             new MockParam("Deckkraft", 100),
             new MockParam("Überblendmodus", 18),
             new MockParam("Überblendmodus", 0)
         ]),
-        makeRealMotionComponent(opts.motion),
-        makeRealAutoReframeComponent(opts.autoReframe)
-    ]);
+        makeRealMotionComponent(opts.motion)
+    ];
+    // Auto Reframe disables Motion, so a clip without it is the only way to
+    // exercise the Motion parameter lookups against the real names.
+    if (!opts.withoutAutoReframe) {
+        components.push(makeRealAutoReframeComponent(opts.autoReframe));
+    }
+    const chain = new MockChain(components);
 
     const clip = new MockTrackItem({
         name: opts.name || "Felix Cam",

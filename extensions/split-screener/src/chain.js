@@ -22,7 +22,8 @@
 const {
     INTRINSIC_MATCHNAME_FRAGMENTS,
     VIDEO_INTRINSIC_MATCHNAME_FRAGMENTS,
-    MOTION_MATCHNAME_FRAGMENTS
+    MOTION_MATCHNAME_FRAGMENTS,
+    AUTO_REFRAME_MATCHNAME_FRAGMENTS
 } = require("./constants.js");
 
 function normalizeName(value) {
@@ -77,25 +78,36 @@ function isMotionMatchName(matchName) {
 }
 
 /**
- * Index at which our effects have to be inserted so they end up behind all
+ * Index at which our effects have to be inserted so they RENDER behind all
  * user effects.
  *
- * Premiere is expected to keep the intrinsic components at the front of the
- * chain, in which case appending is correct. The scan handles the opposite
- * layout too: if any standard component precedes an intrinsic one, the
- * intrinsics form a trailing block and we insert in front of it.
+ * THE CHAIN RUNS OPPOSITE TO THE RENDER ORDER. Measured in Premiere 26.3.2:
+ * a clip whose chain was
+ *
+ *   [0] Opacity  [1] Motion  [2] Auto Reframe  [3] Transform  [4] Crop
+ *
+ * showed its standard effects in Effect Controls — which is render order, top
+ * first — as
+ *
+ *   Crop(4) → Transform(3) → Auto Reframe(2)
+ *
+ * So a HIGHER chain index renders EARLIER. To render last, our effects need
+ * the LOWEST indices among the standard components, which means inserting in
+ * front of them — not appending. Appending put us before Auto Reframe, which
+ * then reframed our already-placed halves out of the picture.
+ *
+ * The intrinsics form the leading block of the chain (Opacity, Motion), so the
+ * insertion point is the first non-intrinsic index.
  *
  * @param {{index: number, matchName: string}[]} infos whole chain, in order
  * @returns {number}
  */
 function computeInsertionIndex(infos) {
     if (!infos || !infos.length) return 0;
-    if (isIntrinsicMatchName(infos[0].matchName)) {
-        return infos.length;
-    }
     for (let i = 0; i < infos.length; i++) {
-        if (isIntrinsicMatchName(infos[i].matchName)) return i;
+        if (!isIntrinsicMatchName(infos[i].matchName)) return i;
     }
+    // Nothing but intrinsics — append, there is no user effect to get behind.
     return infos.length;
 }
 
@@ -110,16 +122,21 @@ function standardComponents(infos) {
 }
 
 /**
- * Locates the Transform + Crop pair this plugin applied.
+ * Locates the Crop + Transform pair this plugin applied.
  *
- * Scans from the end for the last adjacent Transform-then-Crop pair among the
- * standard components. Deliberately *not* restricted to the final two: adding
- * a Lumetri after building a split screen is an everyday thing to do, and
- * failing to recognise our own pair there would make the next run append a
- * second one — halving and shifting the image twice, unrepairable from inside
- * the plugin. The cost is the mirror-image risk: a hand-built Transform
- * directly followed by a Crop is taken for ours. That is the documented
- * limitation, and it is the far less destructive of the two.
+ * Note the order: because the chain runs opposite to the render order (see
+ * computeInsertionIndex), our pair sits in the chain as Crop first, Transform
+ * directly after it — which renders as Transform, then Crop.
+ *
+ * Scans from the front and takes the first such adjacent pair, i.e. the one
+ * that renders last and is therefore the operative one. Deliberately not
+ * pinned to a fixed position in the chain: adding a Lumetri after building a
+ * split screen is an everyday thing to do, and failing to recognise our own
+ * pair there would make the next run insert a second one — halving and
+ * shifting the image twice, unrepairable from inside the plugin. The cost is
+ * the mirror-image risk: a hand-built Crop directly followed by a Transform is
+ * taken for ours. That is the documented limitation, and it is the far less
+ * destructive of the two.
  *
  * @param {{index: number, matchName: string}[]} infos
  * @param {string} transformMatchName resolved at runtime
@@ -130,13 +147,13 @@ function findOwnPair(infos, transformMatchName, cropMatchName) {
     const standard = standardComponents(infos);
     if (standard.length < 2) return null;
 
-    for (let i = standard.length - 1; i >= 1; i--) {
-        const transform = standard[i - 1];
+    for (let i = 0; i < standard.length - 1; i++) {
         const crop = standard[i];
+        const transform = standard[i + 1];
 
-        if (!nameMatchesAny(transform.matchName, [transformMatchName])) continue;
         if (!nameMatchesAny(crop.matchName, [cropMatchName])) continue;
-        if (crop.index !== transform.index + 1) continue;
+        if (!nameMatchesAny(transform.matchName, [transformMatchName])) continue;
+        if (transform.index !== crop.index + 1) continue;
 
         return { transformIndex: transform.index, cropIndex: crop.index };
     }
@@ -151,6 +168,25 @@ function findMotionIndex(infos) {
         if (isMotionMatchName(infos[i].matchName)) return infos[i].index;
     }
     return -1;
+}
+
+/**
+ * True when the clip carries Auto Reframe.
+ *
+ * Relevant because Premiere disables the intrinsic Motion effect entirely
+ * while Auto Reframe is applied — Effect Controls says so in as many words:
+ * "Bewegung (Deaktiviert, wenn Auto Reframe angewendet ist)". Motion's values
+ * are then inert, so neither compensating for them nor rejecting a clip
+ * because of them would be correct.
+ */
+function hasAutoReframe(infos) {
+    if (!infos) return false;
+    for (let i = 0; i < infos.length; i++) {
+        if (containsAnyFragment(infos[i].matchName, AUTO_REFRAME_MATCHNAME_FRAGMENTS)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /**
@@ -197,5 +233,6 @@ module.exports = {
     standardComponents,
     findOwnPair,
     findMotionIndex,
+    hasAutoReframe,
     resolveMatchName
 };

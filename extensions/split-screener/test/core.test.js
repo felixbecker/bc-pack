@@ -44,15 +44,21 @@ function positionOf(component) {
     return { x: value.x, y: value.y };
 }
 
-/** Finds our inserted pair in a chain by match name. */
+/**
+ * Finds our inserted pair in a chain by match name.
+ *
+ * Crop comes first in the chain, Transform directly after it — the chain runs
+ * opposite to the render order.
+ */
 function ownPairOf(chain) {
     const names = chain.matchNames();
-    const transformAt = names.lastIndexOf("AE.ADBE Geometry2");
-    if (transformAt < 0) return null;
+    const cropAt = names.indexOf("AE.ADBE AECrop");
+    if (cropAt < 0) return null;
+    if (names[cropAt + 1] !== "AE.ADBE Geometry2") return null;
     return {
-        transform: chain.getComponentAtIndex(transformAt),
-        crop: chain.getComponentAtIndex(transformAt + 1),
-        transformIndex: transformAt
+        crop: chain.getComponentAtIndex(cropAt),
+        transform: chain.getComponentAtIndex(cropAt + 1),
+        cropIndex: cropAt
     };
 }
 
@@ -60,7 +66,7 @@ function ownPairOf(chain) {
 // The happy path
 // ---------------------------------------------------------------------------
 
-test("a fresh pair gets Transform and Crop appended behind the user effects", async function () {
+test("a fresh pair gets Transform and Crop inserted in front of the user effects", async function () {
     setup();
     const clips = mock.makePair({
         lower: { effectsBefore: [new mock.MockComponent("PR.ADBE Lumetri", "Lumetri", [])] }
@@ -73,19 +79,46 @@ test("a fresh pair gets Transform and Crop appended behind the user effects", as
     assert.equal(report.processed, 2);
     assert.equal(report.errors, 0);
 
+    // In the chain they sit in front of Lumetri, as Crop then Transform …
     assert.deepEqual(clips[0].chain.matchNames(), [
         "AE.ADBE Opacity",
         "AE.ADBE Motion",
+        "AE.ADBE AECrop",
+        "AE.ADBE Geometry2",
+        "PR.ADBE Lumetri"
+    ]);
+    // … which renders as Lumetri → Transform → Crop, i.e. ours last.
+    assert.deepEqual(clips[0].chain.renderOrder(), [
         "PR.ADBE Lumetri",
         "AE.ADBE Geometry2",
         "AE.ADBE AECrop"
     ]);
-    assert.deepEqual(clips[1].chain.matchNames(), [
-        "AE.ADBE Opacity",
-        "AE.ADBE Motion",
-        "AE.ADBE Geometry2",
-        "AE.ADBE AECrop"
-    ]);
+});
+
+test("our effects render behind every user effect", async function () {
+    setup();
+    // The regression that made both clips vanish: appended to the chain, our
+    // effects rendered BEFORE Auto Reframe, which then reframed the placed
+    // halves out of the picture.
+    const clips = mock.makePair({
+        lower: {
+            effectsBefore: [
+                new mock.MockComponent("AE.ADBE AEFilterAutoFramer", "Auto Reframe", []),
+                new mock.MockComponent("PR.ADBE Lumetri", "Lumetri", [])
+            ]
+        }
+    });
+    mock.selectClips(clips);
+
+    await core.createSplitScreen(COLUMNS);
+
+    const order = clips[0].chain.renderOrder();
+    assert.equal(order[order.length - 2], "AE.ADBE Geometry2");
+    assert.equal(order[order.length - 1], "AE.ADBE AECrop");
+    assert.ok(
+        order.indexOf("AE.ADBE AEFilterAutoFramer") < order.indexOf("AE.ADBE Geometry2"),
+        "Auto Reframe muss vor unseren Effekten rendern, war: " + order.join(" → ")
+    );
 });
 
 test("the written values match the documented default case", async function () {
@@ -172,12 +205,8 @@ test("several pairs in one selection are all built", async function () {
     }
 });
 
-test("intrinsics at the end of the chain are inserted in front of", async function () {
+test("intrinsics at the end of the chain change nothing about render order", async function () {
     setup();
-    // A user effect is required for the layout to be detectable at all: a
-    // chain consisting only of intrinsics looks the same either way, and
-    // computeInsertionIndex then assumes the documented intrinsics-first
-    // layout and appends.
     const clips = mock.makePair({
         lower: {
             intrinsicsLast: true,
@@ -192,12 +221,10 @@ test("intrinsics at the end of the chain are inserted in front of", async functi
 
     await core.createSplitScreen(COLUMNS);
 
-    assert.deepEqual(clips[0].chain.matchNames(), [
+    assert.deepEqual(clips[0].chain.renderOrder(), [
         "PR.ADBE Lumetri",
         "AE.ADBE Geometry2",
-        "AE.ADBE AECrop",
-        "AE.ADBE Opacity",
-        "AE.ADBE Motion"
+        "AE.ADBE AECrop"
     ]);
 });
 
@@ -208,9 +235,15 @@ test("a chain of only intrinsics is appended to", async function () {
 
     await core.createSplitScreen(COLUMNS);
 
+    // No user effect to get behind, so appending is correct and the order
+    // among our own two is what matters.
     assert.deepEqual(clips[0].chain.matchNames(), [
         "AE.ADBE Opacity",
         "AE.ADBE Motion",
+        "AE.ADBE AECrop",
+        "AE.ADBE Geometry2"
+    ]);
+    assert.deepEqual(clips[0].chain.renderOrder(), [
         "AE.ADBE Geometry2",
         "AE.ADBE AECrop"
     ]);
@@ -359,6 +392,7 @@ test("removal deletes exactly our two components", async function () {
         "PR.ADBE Lumetri"
     ]);
     assert.deepEqual(clips[1].chain.matchNames(), ["AE.ADBE Opacity", "AE.ADBE Motion"]);
+    assert.deepEqual(clips[0].chain.renderOrder(), ["PR.ADBE Lumetri"]);
 });
 
 test("removal leaves Motion untouched", async function () {
@@ -915,6 +949,12 @@ test("the real host's effects land behind Auto Reframe", async function () {
     assert.deepEqual(clips[0].chain.matchNames(), [
         "AE.ADBE Opacity",
         "AE.ADBE Motion",
+        "AE.ADBE AECrop",
+        "AE.ADBE Geometry2",
+        "AE.ADBE AEFilterAutoFramer"
+    ]);
+    // What actually matters: Auto Reframe renders first, ours last.
+    assert.deepEqual(clips[0].chain.renderOrder(), [
         "AE.ADBE AEFilterAutoFramer",
         "AE.ADBE Geometry2",
         "AE.ADBE AECrop"
@@ -943,7 +983,13 @@ test("the Motion scale is found as \"Skalieren\"", async function () {
     // The name list used to carry only "Skalierung", and the fragment
     // "skalierung" matches "Skalierungsbreite" — the wrong parameter. The run
     // failed closed back then; it has to succeed now, by name.
-    const clips = mock.makeRealPair();
+    //
+    // Without Auto Reframe on purpose: with it, Premiere disables Motion and
+    // the lookups never run.
+    const clips = [
+        mock.makeRealClip({ name: "A", trackIndex: 1, withoutAutoReframe: true }),
+        mock.makeRealClip({ name: "B", trackIndex: 2, withoutAutoReframe: true })
+    ];
     mock.selectClips(clips, { width: 1080, height: 1080 });
 
     const report = await core.createSplitScreen({
@@ -965,7 +1011,10 @@ test("the Motion scale is found as \"Skalieren\"", async function () {
 
 test("the nameless uniform-scale checkbox is found structurally", async function () {
     setup();
-    const clips = mock.makeRealPair();
+    const clips = [
+        mock.makeRealClip({ name: "A", trackIndex: 1, withoutAutoReframe: true }),
+        mock.makeRealClip({ name: "B", trackIndex: 2, withoutAutoReframe: true })
+    ];
     mock.selectClips(clips, { width: 1080, height: 1080 });
 
     const report = await core.createSplitScreen({
@@ -978,6 +1027,39 @@ test("the nameless uniform-scale checkbox is found structurally", async function
         return c.param === "Parameter-Auflösung";
     });
     assert.match(resolution.value, /GleichmäßigSkalieren: struktur/);
+});
+
+test("Auto Reframe disables Motion, so nothing is compensated", async function () {
+    setup();
+    // Effect Controls says it outright: "Bewegung (Deaktiviert, wenn Auto
+    // Reframe angewendet ist)". Reading Motion's values would be wrong in both
+    // directions — compensating for them, or rejecting the clip over them.
+    const clips = mock.makeRealPair();
+    clips[0].motionComponent.param("Drehung")._value = 7;
+    clips[0].motionComponent.param("Skalieren")._value = 150;
+    mock.selectClips(clips, { width: 1080, height: 1080 });
+
+    const report = await core.createSplitScreen({
+        layout: "rows",
+        swap: false,
+        dryRun: false
+    });
+
+    assert.equal(report.fatalError, null, "ein gedrehter, aber abgeschalteter Effekt darf nicht blockieren");
+    assert.equal(report.processed, 2);
+    // Placement is the untouched default, not compensated for scale 150.
+    assert.deepEqual(cropValues(ownPairOf(clips[0].chain).crop), {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 50
+    });
+    assert.ok(
+        report.notes.some(function (n) {
+            return n.indexOf("Auto Reframe") !== -1;
+        }),
+        "der Report muss erwähnen, dass nicht kompensiert wurde"
+    );
 });
 
 test("the Motion crop parameters are not mistaken for ours", async function () {

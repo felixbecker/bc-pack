@@ -62,8 +62,22 @@ const CROP_MATCHNAME_FRAGMENTS = ["crop"];
 // Effects we read
 // ---------------------------------------------------------------------------
 
-/** Intrinsic Motion effect — applied after all standard effects. */
+/** Intrinsic Motion effect. */
 const MOTION_MATCHNAME_FRAGMENTS = ["adbe motion"];
+
+/**
+ * Auto Reframe. Confirmed match name in 26.3.2: AE.ADBE AEFilterAutoFramer.
+ *
+ * Matters because Premiere switches the intrinsic Motion effect off while Auto
+ * Reframe is applied, so Motion's values must neither be compensated for nor
+ * used to reject a clip.
+ */
+const AUTO_REFRAME_MATCHNAME_FRAGMENTS = [
+    "autoframer",
+    "autoreframe",
+    "auto_reframe",
+    "aireframe"
+];
 
 /**
  * Intrinsic components. They are never user effects, so they are excluded when
@@ -232,6 +246,7 @@ module.exports = {
     CROP_MATCHNAMES,
     CROP_MATCHNAME_FRAGMENTS,
     MOTION_MATCHNAME_FRAGMENTS,
+    AUTO_REFRAME_MATCHNAME_FRAGMENTS,
     INTRINSIC_MATCHNAME_FRAGMENTS,
     VIDEO_INTRINSIC_MATCHNAME_FRAGMENTS,
     CROP_PARAMS,

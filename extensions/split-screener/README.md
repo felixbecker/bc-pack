@@ -47,8 +47,12 @@ gehängt:
 [ Nutzer-Effekte: Auto Reframe, Lumetri, eigener Beschnitt … ]
    → Transformieren   (verschiebt das Bild in seine Hälfte)
    → Zuschneiden      (schneidet die Hälfte heraus)
-   → intrinsisch: Bewegung, Deckkraft
 ```
+
+Das ist die **Render-Reihenfolge**. In der Component-Chain der API stehen die
+beiden Effekte umgekehrt und am Anfang des Standard-Blocks, weil die Chain
+gegenläufig zur Render-Reihenfolge läuft — Details in
+[IMPLEMENTATION.md](IMPLEMENTATION.md).
 
 Weil beide Effekte hinter allem sitzen, ist egal, was davor passiert: Auto
 Reframe, Farbkorrektur oder ein von Hand gesetzter Beschnitt sind für uns
@@ -194,6 +198,9 @@ durch einen Diagnose-Lauf bestätigt:
 | Prozentwerte | 0‥100 |
 | Intrinsische Komponenten | am Anfang der Kette (Deckkraft, Bewegung), Nutzer-Effekte danach |
 | Bewegungs-Skalierung | heißt `"Skalieren"`, nicht `"Skalierung"` |
+| Chain-Reihenfolge | **gegenläufig zur Render-Reihenfolge** — höherer Index rendert früher |
+| Bewegung bei Auto Reframe | von Premiere **abgeschaltet**, Werte wirkungslos |
+| Koordinatenraum der Effekte | der **Quellclip** (hier 1920×1080), nicht die Sequenz (1080×1080) |
 | „Gleichmäßig skalieren" | hat **keinen Namen** (ein Leerzeichen) und wird strukturell erkannt |
 
 Der Host bietet außerdem einen Fremdeffekt `AE.Impact_Crop_FX`, der ebenfalls

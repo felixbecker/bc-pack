@@ -49,7 +49,7 @@ const pairing = require("./pairing.js");
 
 const TICKS_PER_SECOND = 254016000000;
 
-const PLUGIN_VERSION = "1.1.1";
+const PLUGIN_VERSION = "1.2.0";
 
 /** Tolerances used when verifying what was written. */
 const VERIFY_EPSILON_PIXELS = 0.75;
@@ -825,6 +825,7 @@ async function readClipRecord(trackItem, id, width, height, resolved) {
             isVideo: false,
             chainProblem: null,
             motionProblem: null,
+            motionDisabled: false,
             motion: null
         }
     };
@@ -910,9 +911,45 @@ async function readClipRecord(trackItem, id, width, height, resolved) {
         return record;
     }
 
+    /*
+     * Premiere switches the intrinsic Motion effect off while Auto Reframe is
+     * applied — Effect Controls states it outright: "Bewegung (Deaktiviert,
+     * wenn Auto Reframe angewendet ist)". Its values are then inert, so they
+     * must neither be compensated for nor used to reject the clip: a leftover
+     * rotation or keyframe in a disabled effect changes nothing on screen.
+     *
+     * The parameters are still dumped for the diagnostics log.
+     */
+    if (chainUtil.hasAutoReframe(record.infos)) {
+        record.descriptor.motionDisabled = true;
+        record.descriptor.motion = {
+            positionPixels: { x: width / 2, y: height / 2 },
+            scaleX: 1,
+            scaleY: 1,
+            scaleConvention: geometry.SCALE_CONVENTION.PERCENT,
+            rotation: 0,
+            rotated: false,
+            anchorMoved: false,
+            keyframed: false,
+            disabled: true,
+            strategies: {}
+        };
+        record.descriptor.motionProblem = null;
+        try {
+            record.motionParams = await describeComponentParams(
+                motionComponent,
+                record.time
+            );
+        } catch {
+            record.motionParams = null;
+        }
+        return record;
+    }
+
     const motionResult = await readMotionState(motionComponent, record.time, width, height);
     record.descriptor.motion = motionResult.motion;
     record.descriptor.motionProblem = motionResult.problem;
+    record.motionParams = motionResult.params;
 
     return record;
 }
@@ -1377,11 +1414,19 @@ async function createSplitScreen(rawOptions) {
                         const entry = toInsert[i];
                         const chain = entry.record.chain;
                         const index = entry.record.insertionIndex;
+                        /*
+                         * Both go in at the SAME index, Transform first: the
+                         * second insertion pushes the Transform one up, which
+                         * leaves the chain as [… Crop, Transform, user effects]
+                         * — and because the chain runs opposite to the render
+                         * order, that renders as user effects → Transform →
+                         * Crop. See chain.computeInsertionIndex.
+                         */
                         compoundAction.addAction(
                             chain.createInsertComponentAction(entry.newTransform, index)
                         );
                         compoundAction.addAction(
-                            chain.createInsertComponentAction(entry.newCrop, index + 1)
+                            chain.createInsertComponentAction(entry.newCrop, index)
                         );
                     }
                 }, C.UNDO_INSERT);
@@ -1742,6 +1787,19 @@ async function createSplitScreen(rawOptions) {
     report.notes.push(
         plan.pairs.length + (plan.pairs.length === 1 ? " Paar" : " Paare") + " verarbeitet."
     );
+
+    let disabledMotion = 0;
+    for (let i = 0; i < writable.length; i++) {
+        if (writable[i].record.descriptor.motionDisabled) disabledMotion++;
+    }
+    if (disabledMotion > 0) {
+        report.notes.push(
+            disabledMotion +
+                (disabledMotion === 1 ? " Clip hat" : " Clips haben") +
+                " Auto Reframe — Premiere schaltet dort den Bewegungs-Effekt ab, " +
+                "es wurde daher nichts kompensiert."
+        );
+    }
     report.notes.push(
         toInsert.length
             ? "Rückgängig: zwei Schritte (Effekte einfügen, Werte setzen)."
