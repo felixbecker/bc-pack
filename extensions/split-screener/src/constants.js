@@ -49,7 +49,13 @@ const TRANSFORM_MATCHNAMES = ["AE.ADBE Geometry2", "ADBE Geometry2"];
 const TRANSFORM_MATCHNAME_FRAGMENTS = ["geometry2", "geometry"];
 
 /** Crop effect — cuts the cell out of the frame. */
-const CROP_MATCHNAMES = ["AE.ADBE Crop", "ADBE Crop", "PR.ADBE Crop"];
+const CROP_MATCHNAMES = [
+    // Confirmed in Premiere 26.3.2: the effect is called AECrop, not Crop.
+    "AE.ADBE AECrop",
+    "AE.ADBE Crop",
+    "ADBE Crop",
+    "PR.ADBE Crop"
+];
 const CROP_MATCHNAME_FRAGMENTS = ["crop"];
 
 // ---------------------------------------------------------------------------
@@ -141,8 +147,41 @@ const TRANSFORM_ANCHOR_FRAGMENTS = ["anker", "anchor"];
 const MOTION_POSITION_NAMES = ["position"];
 const MOTION_POSITION_FRAGMENTS = ["position"];
 
-const MOTION_SCALE_NAMES = ["scale", "skalierung", "scale height", "skalierungshöhe"];
-const MOTION_SCALE_FRAGMENTS = ["skalierungshöhe", "scale height", "skalierung", "scale"];
+/*
+ * Observed layout of AE.ADBE Motion (Premiere 26.3.2, de_DE):
+ *
+ *    0  "Position"              PointF
+ *    1  "Skalieren"             number   <- NOT "Skalierung"
+ *    2  "Skalierungsbreite"     number
+ *    3  " "                     boolean  <- "Gleichmäßig skalieren", NAMELESS
+ *    4  "Drehung"               number
+ *    5  "Ankerpunkt"            PointF
+ *    6  "Anti-Flimmer-Filter"   number
+ *    7  "Links zuschneiden"     number
+ *    8  "Oben zuschneiden"      number
+ *    9  "Rechts zuschneiden"    number
+ *   10  "Unten zuschneiden"     number
+ *
+ * Two things to take from this. First, the uniform-scale checkbox has a
+ * display name of a single space, so no name list can ever find it — it is
+ * resolved structurally instead (the only genuinely boolean parameter).
+ * Second, the fragment "skalierung" matches "Skalierungsbreite", which is why
+ * the width is claimed before the scale is looked up.
+ */
+const MOTION_SCALE_NAMES = [
+    "skalieren",
+    "scale",
+    "skalierung",
+    "scale height",
+    "skalierungshöhe"
+];
+const MOTION_SCALE_FRAGMENTS = [
+    "skalierungshöhe",
+    "scale height",
+    "skalieren",
+    "skalier",
+    "scale"
+];
 
 const MOTION_SCALE_WIDTH_NAMES = [
     "scale width",

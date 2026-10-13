@@ -347,7 +347,10 @@ const state = {
     /** Match names the host claims to offer. */
     availableMatchNames: [
         "AE.ADBE Mosaic",
-        "AE.ADBE Crop",
+        // The real host offers AECrop, not Crop, plus a third-party effect
+        // that also contains "crop" — both confirmed by a diagnostics dump.
+        "AE.ADBE AECrop",
+        "AE.Impact_Crop_FX",
         "AE.ADBE Geometry2",
         "AE.ADBE AEFilterAutoFramer",
         "PR.ADBE Lumetri"
@@ -434,7 +437,9 @@ function makeCropComponent(options) {
         new MockParam(names[3], 0, opts.paramOptions || {})
     ];
     if (!opts.withoutZoom) params.push(new MockParam("Zoom", false));
-    return new MockComponent("AE.ADBE Crop", "Zuschneiden", params);
+    // Defaults to the name the real host uses, so the fixtures and the
+    // resolved match name cannot drift apart.
+    return new MockComponent(opts.matchName || "AE.ADBE AECrop", "Zuschneiden", params);
 }
 
 const VideoFilterFactory = {
@@ -449,8 +454,10 @@ const VideoFilterFactory = {
         let component;
         if (matchName === "AE.ADBE Geometry2") {
             component = makeTransformComponent(state.transformOptions);
-        } else if (matchName === "AE.ADBE Crop") {
-            component = makeCropComponent(state.cropOptions);
+        } else if (matchName === "AE.ADBE AECrop" || matchName === "AE.ADBE Crop") {
+            component = makeCropComponent(
+                Object.assign({ matchName: matchName }, state.cropOptions || {})
+            );
         } else {
             component = new MockComponent(matchName, matchName, []);
         }
@@ -623,6 +630,108 @@ function makePair(options) {
     return [lower, upper];
 }
 
+/**
+ * The Motion effect exactly as Premiere 26.3.2 / de_DE reports it.
+ *
+ * Taken from a real diagnostics dump, not invented. Three details in here
+ * broke the plugin on first contact and are the reason this fixture exists:
+ * the scale is called "Skalieren" (not "Skalierung"), the uniform-scale
+ * checkbox has a display name of a single space, and the effect carries its
+ * own crop parameters whose names contain "zuschneiden".
+ */
+function makeRealMotionComponent(options) {
+    const opts = options || {};
+    return new MockComponent("AE.ADBE Motion", "Bewegung", [
+        new MockParam(
+            "Position",
+            opts.position || new PointF(0.5, 0.5),
+            opts.positionOptions || {}
+        ),
+        new MockParam("Skalieren", opts.scale === undefined ? 100 : opts.scale),
+        new MockParam(
+            "Skalierungsbreite",
+            opts.scaleWidth === undefined ? 100 : opts.scaleWidth
+        ),
+        // The uniform-scale checkbox: a single space, not a name.
+        new MockParam(" ", opts.uniform === undefined ? true : opts.uniform),
+        new MockParam("Drehung", opts.rotation === undefined ? 0 : opts.rotation),
+        new MockParam("Ankerpunkt", opts.anchor || new PointF(0.5, 0.5)),
+        new MockParam("Anti-Flimmer-Filter", 0),
+        new MockParam("Links zuschneiden", 0),
+        new MockParam("Oben zuschneiden", 0),
+        new MockParam("Rechts zuschneiden", 0),
+        new MockParam("Unten zuschneiden", 0)
+    ]);
+}
+
+/** Auto Reframe as the real host reports it, including the nameless flag. */
+function makeRealAutoReframeComponent(options) {
+    const opts = options || {};
+    return new MockComponent("AE.ADBE AEFilterAutoFramer", "Auto Reframe", [
+        new MockParam("", false),
+        new MockParam("Motion-Tracking", 1),
+        new MockParam("Position", new PointF(0.5, 0.5), { timeVarying: true }),
+        new MockParam("Scale (Merged)", 100),
+        new MockParam("Uniform Scale", true),
+        new MockParam("Anchor Point", new PointF(0.5, 0.5)),
+        new MockParam("Position anpassen", opts.adjustPosition || new PointF(0.5, 0.5)),
+        new MockParam("Generated Keyframes", new PointF(0.5, 0.5), { timeVarying: true }),
+        new MockParam("", !!opts.overrideActive),
+        new MockParam("Hash arb data", null, { unreadable: true }),
+        new MockParam("Reframing für Versatz", new PointF(0, 0)),
+        new MockParam("Reframing für Skalierung", 100),
+        new MockParam("Scale (Auto Generated)", 100),
+        new MockParam("Reframing für Drehung", 0)
+    ]);
+}
+
+/**
+ * A clip as the real host presents it: Deckkraft, Bewegung, Auto Reframe —
+ * in that order, intrinsics first.
+ */
+function makeRealClip(options) {
+    const opts = options || {};
+
+    const chain = new MockChain([
+        new MockComponent("AE.ADBE Opacity", "Deckkraft", [
+            new MockParam("Deckkraft", 100),
+            new MockParam("Überblendmodus", 18),
+            new MockParam("Überblendmodus", 0)
+        ]),
+        makeRealMotionComponent(opts.motion),
+        makeRealAutoReframeComponent(opts.autoReframe)
+    ]);
+
+    const clip = new MockTrackItem({
+        name: opts.name || "Felix Cam",
+        chain: chain,
+        trackIndex: opts.trackIndex === undefined ? 1 : opts.trackIndex,
+        startTicks: opts.startTicks === undefined ? S(300) : opts.startTicks,
+        endTicks: opts.endTicks === undefined ? S(310) : opts.endTicks,
+        inTicks: opts.inTicks === undefined ? S(326.96) : opts.inTicks
+    });
+    clip.motionComponent = chain.components[1];
+    clip.ownTransform = null;
+    clip.ownCrop = null;
+    return clip;
+}
+
+/** The real-world pair: Felix Cam on V2, Thomas Cam on V3, 1080×1080. */
+function makeRealPair() {
+    return [
+        makeRealClip({ name: "Felix Cam", trackIndex: 1 }),
+        makeRealClip({
+            name: "Thomas Cam",
+            trackIndex: 2,
+            inTicks: S(326.88),
+            autoReframe: {
+                adjustPosition: new PointF(0.712, 0.5),
+                overrideActive: true
+            }
+        })
+    ];
+}
+
 /** Installs a selection and returns the sequence mock. */
 function selectClips(clips, options) {
     const opts = options || {};
@@ -660,7 +769,8 @@ function reset() {
     state.cropOptions = null;
     state.availableMatchNames = [
         "AE.ADBE Mosaic",
-        "AE.ADBE Crop",
+        "AE.ADBE AECrop",
+        "AE.Impact_Crop_FX",
         "AE.ADBE Geometry2",
         "AE.ADBE AEFilterAutoFramer",
         "PR.ADBE Lumetri"
@@ -684,6 +794,10 @@ module.exports = {
     makeCropComponent,
     makeClip,
     makePair,
+    makeRealMotionComponent,
+    makeRealAutoReframeComponent,
+    makeRealClip,
+    makeRealPair,
     selectClips,
     reset
 };

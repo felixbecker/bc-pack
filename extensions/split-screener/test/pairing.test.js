@@ -294,7 +294,7 @@ test("intrinsic components are recognised", function () {
     assert.equal(chainUtil.isIntrinsicMatchName("AE.ADBE Motion"), true);
     assert.equal(chainUtil.isIntrinsicMatchName("AE.ADBE Opacity"), true);
     assert.equal(chainUtil.isIntrinsicMatchName("AE.ADBE Time Remapping"), true);
-    assert.equal(chainUtil.isIntrinsicMatchName("AE.ADBE Crop"), false);
+    assert.equal(chainUtil.isIntrinsicMatchName("AE.ADBE AECrop"), false);
     assert.equal(chainUtil.isIntrinsicMatchName("AE.ADBE Geometry2"), false);
 });
 
@@ -333,9 +333,9 @@ test("our own pair is detected at the end of the standard effects", function () 
         info(1, "AE.ADBE Motion"),
         info(2, "PR.ADBE Lumetri"),
         info(3, "AE.ADBE Geometry2"),
-        info(4, "AE.ADBE Crop")
+        info(4, "AE.ADBE AECrop")
     ];
-    assert.deepEqual(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE Crop"), {
+    assert.deepEqual(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE AECrop"), {
         transformIndex: 3,
         cropIndex: 4
     });
@@ -344,53 +344,53 @@ test("our own pair is detected at the end of the standard effects", function () 
 test("a foreign crop alone is not mistaken for our pair", function () {
     const infos = [
         info(0, "AE.ADBE Motion"),
-        info(1, "AE.ADBE Crop"),
+        info(1, "AE.ADBE AECrop"),
         info(2, "PR.ADBE Lumetri")
     ];
-    assert.equal(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE Crop"), null);
+    assert.equal(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE AECrop"), null);
 });
 
 test("the wrong order is not mistaken for our pair", function () {
     const infos = [
         info(0, "AE.ADBE Motion"),
-        info(1, "AE.ADBE Crop"),
+        info(1, "AE.ADBE AECrop"),
         info(2, "AE.ADBE Geometry2")
     ];
-    assert.equal(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE Crop"), null);
+    assert.equal(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE AECrop"), null);
 });
 
 test("our pair is still found when a foreign crop precedes it", function () {
     const infos = [
         info(0, "AE.ADBE Motion"),
-        info(1, "AE.ADBE Crop"),
+        info(1, "AE.ADBE AECrop"),
         info(2, "AE.ADBE Geometry2"),
-        info(3, "AE.ADBE Crop")
+        info(3, "AE.ADBE AECrop")
     ];
-    assert.deepEqual(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE Crop"), {
+    assert.deepEqual(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE AECrop"), {
         transformIndex: 2,
         cropIndex: 3
     });
 });
 
 test("match names are resolved exactly when available", function () {
-    const available = ["AE.ADBE Mosaic", "AE.ADBE Crop", "AE.ADBE Geometry2"];
+    const available = ["AE.ADBE Mosaic", "AE.ADBE AECrop", "AE.ADBE Geometry2"];
     assert.equal(
-        chainUtil.resolveMatchName(available, ["AE.ADBE Crop"], ["crop"]),
-        "AE.ADBE Crop"
+        chainUtil.resolveMatchName(available, ["AE.ADBE AECrop"], ["crop"]),
+        "AE.ADBE AECrop"
     );
 });
 
 test("match name resolution falls back to the shortest fragment match", function () {
     const available = ["AE.ADBE Auto Crop Pro", "AE.ADBE Crop2"];
     assert.equal(
-        chainUtil.resolveMatchName(available, ["AE.ADBE Crop"], ["crop"]),
+        chainUtil.resolveMatchName(available, ["AE.ADBE AECrop"], ["crop"]),
         "AE.ADBE Crop2"
     );
 });
 
 test("match name resolution reports nothing when the effect is absent", function () {
     assert.equal(
-        chainUtil.resolveMatchName(["AE.ADBE Mosaic"], ["AE.ADBE Crop"], ["crop"]),
+        chainUtil.resolveMatchName(["AE.ADBE Mosaic"], ["AE.ADBE AECrop"], ["crop"]),
         null
     );
 });
@@ -398,7 +398,7 @@ test("match name resolution reports nothing when the effect is absent", function
 test("the Motion component is located by match name", function () {
     const infos = [info(0, "AE.ADBE Opacity"), info(1, "AE.ADBE Motion")];
     assert.equal(chainUtil.findMotionIndex(infos), 1);
-    assert.equal(chainUtil.findMotionIndex([info(0, "AE.ADBE Crop")]), -1);
+    assert.equal(chainUtil.findMotionIndex([info(0, "AE.ADBE AECrop")]), -1);
 });
 
 test("name matching is case and whitespace tolerant", function () {
@@ -466,10 +466,10 @@ test("our pair is still found when an effect was added afterwards", function () 
         info(0, "AE.ADBE Opacity"),
         info(1, "AE.ADBE Motion"),
         info(2, "AE.ADBE Geometry2"),
-        info(3, "AE.ADBE Crop"),
+        info(3, "AE.ADBE AECrop"),
         info(4, "PR.ADBE Lumetri")
     ];
-    assert.deepEqual(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE Crop"), {
+    assert.deepEqual(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE AECrop"), {
         transformIndex: 2,
         cropIndex: 3
     });
@@ -479,11 +479,11 @@ test("with two stacked pairs the last one is addressed", function () {
     const infos = [
         info(0, "AE.ADBE Motion"),
         info(1, "AE.ADBE Geometry2"),
-        info(2, "AE.ADBE Crop"),
+        info(2, "AE.ADBE AECrop"),
         info(3, "AE.ADBE Geometry2"),
-        info(4, "AE.ADBE Crop")
+        info(4, "AE.ADBE AECrop")
     ];
-    assert.deepEqual(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE Crop"), {
+    assert.deepEqual(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE AECrop"), {
         transformIndex: 3,
         cropIndex: 4
     });
@@ -494,9 +494,9 @@ test("a non-adjacent Transform and Crop are not taken for our pair", function ()
         info(0, "AE.ADBE Motion"),
         info(1, "AE.ADBE Geometry2"),
         info(2, "PR.ADBE Lumetri"),
-        info(3, "AE.ADBE Crop")
+        info(3, "AE.ADBE AECrop")
     ];
-    assert.equal(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE Crop"), null);
+    assert.equal(chainUtil.findOwnPair(infos, "AE.ADBE Geometry2", "AE.ADBE AECrop"), null);
 });
 
 // ---------------------------------------------------------------------------

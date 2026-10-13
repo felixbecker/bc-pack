@@ -49,7 +49,7 @@ const pairing = require("./pairing.js");
 
 const TICKS_PER_SECOND = 254016000000;
 
-const PLUGIN_VERSION = "1.1.0";
+const PLUGIN_VERSION = "1.1.1";
 
 /** Tolerances used when verifying what was written. */
 const VERIFY_EPSILON_PIXELS = 0.75;
@@ -427,6 +427,44 @@ function makePointParamFallback(time, width, height) {
     };
 }
 
+/**
+ * Last-resort identification of a checkbox whose display name is unusable.
+ *
+ * Confirmed necessary in Premiere 26.3.2: the Motion effect's
+ * "Gleichmäßig skalieren" has a display name of a single space, so no name
+ * list can ever find it. The probe therefore looks for the *only* parameter
+ * that reads as a genuine boolean — unique in that effect, where every other
+ * parameter is a number or a point.
+ *
+ * Requires a real boolean rather than values.toFlag, which would also accept
+ * the numeric 0 of "Anti-Flimmer-Filter" and make the result ambiguous. If
+ * more than one candidate exists the probe gives up, so an ambiguous effect
+ * fails closed instead of guessing.
+ */
+function makeSingleBooleanParamFallback(time) {
+    return async function (component, claimed) {
+        const skip = claimed || [];
+        let count = 0;
+        try {
+            count = component.getParamCount();
+        } catch {
+            return -1;
+        }
+
+        let found = -1;
+        for (let i = 0; i < count; i++) {
+            if (skip.indexOf(i) !== -1) continue;
+            const param = component.getParam(i);
+            if (!param) continue;
+            const read = await readParamValue(param, time);
+            if (!read.ok || typeof read.value !== "boolean") continue;
+            if (found >= 0) return -1; // ambiguous
+            found = i;
+        }
+        return found;
+    };
+}
+
 function paramLookupError(label, reason, dump) {
     return new Error(
         'Parameter "' +
@@ -649,7 +687,9 @@ async function readMotionState(motionComponent, time, width, height) {
             expect: "flag",
             time: time,
             dump: dump,
-            claimed: claimed
+            claimed: claimed,
+            // Nameless in Premiere 26.3.2 — see makeSingleBooleanParamFallback.
+            structuralFallback: makeSingleBooleanParamFallback(time)
         });
         claimed.push(uniform.index);
 
@@ -733,7 +773,17 @@ async function readMotionState(motionComponent, time, width, height) {
                 rotated: Math.abs(rotation.value) > C.ROTATION_EPSILON || rotationVarying,
                 anchorMoved: anchorOffset > C.ANCHOR_EPSILON_PIXELS || anchorVarying,
                 keyframed:
-                    positionVarying || scaleVarying || scaleWidthVarying || uniformVarying
+                    positionVarying || scaleVarying || scaleWidthVarying || uniformVarying,
+                // How each parameter was identified, so a lookup that only
+                // worked via the positional or structural fallback is visible
+                // in the report instead of silently fine.
+                strategies: {
+                    "Bewegung·Position": position.strategy,
+                    "Bewegung·Skalierung": scale.strategy,
+                    "Bewegung·Drehung": rotation.strategy,
+                    "Bewegung·Ankerpunkt": anchor.strategy,
+                    "Bewegung·GleichmäßigSkalieren": uniform.strategy
+                }
             }
         };
     } catch (error) {
@@ -1103,17 +1153,23 @@ function describeChanges(placement) {
  * otherwise confirm itself. If a log says "struktur" where it should say
  * "name", the name lists need fixing.
  */
-function describeResolution(current) {
-    if (!current || !current.strategies) return null;
-
+function describeResolution(current, motion) {
     const unusual = [];
-    const keys = Object.keys(current.strategies);
-    for (let i = 0; i < keys.length; i++) {
-        const strategy = current.strategies[keys[i]];
-        if (strategy && strategy !== "name") {
-            unusual.push(keys[i] + ": " + strategy);
+
+    function collect(strategies) {
+        if (!strategies) return;
+        const keys = Object.keys(strategies);
+        for (let i = 0; i < keys.length; i++) {
+            const strategy = strategies[keys[i]];
+            if (strategy && strategy !== "name") {
+                unusual.push(keys[i] + ": " + strategy);
+            }
         }
     }
+
+    collect(motion && motion.strategies);
+    collect(current && current.strategies);
+
     if (!unusual.length) return null;
 
     return {
@@ -1253,6 +1309,19 @@ async function createSplitScreen(rawOptions) {
         for (let i = 0; i < entries.length; i++) {
             const entry = entries[i];
             report.processed++;
+
+            const changes = describeChanges(entry.placement);
+            if (entry.placement.warnings.indexOf(geometry.WARNING.CELL_NOT_FILLED) >= 0) {
+                changes.push({
+                    param: "Hinweis",
+                    value: "Clip liefert zu wenig Bild — Hälfte wird nicht vollständig gefüllt."
+                });
+            }
+            // Only the Motion lookups have run at this point; the Transform
+            // and Crop parameters do not exist yet in the dry run.
+            const resolution = describeResolution(null, entry.record.descriptor.motion);
+            if (resolution) changes.push(resolution);
+
             report.results.push({
                 clipName: entry.record.descriptor.name,
                 status: "ok",
@@ -1262,17 +1331,7 @@ async function createSplitScreen(rawOptions) {
                     (entry.record.ownPair
                         ? " · bestehender Splitscreen würde aktualisiert."
                         : " · Effekte würden neu eingefügt."),
-                changes: describeChanges(entry.placement).concat(
-                    entry.placement.warnings.indexOf(geometry.WARNING.CELL_NOT_FILLED) >= 0
-                        ? [
-                              {
-                                  param: "Hinweis",
-                                  value:
-                                      "Clip liefert zu wenig Bild — Hälfte wird nicht vollständig gefüllt."
-                              }
-                          ]
-                        : []
-                )
+                changes: changes
             });
         }
         report.notes.push(
@@ -1652,7 +1711,10 @@ async function createSplitScreen(rawOptions) {
             });
         }
 
-        const resolution = describeResolution(entry.current);
+        const resolution = describeResolution(
+            entry.current,
+            entry.record.descriptor.motion
+        );
         if (resolution) changes.push(resolution);
 
         if (problems.length) {

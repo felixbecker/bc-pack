@@ -78,13 +78,13 @@ test("a fresh pair gets Transform and Crop appended behind the user effects", as
         "AE.ADBE Motion",
         "PR.ADBE Lumetri",
         "AE.ADBE Geometry2",
-        "AE.ADBE Crop"
+        "AE.ADBE AECrop"
     ]);
     assert.deepEqual(clips[1].chain.matchNames(), [
         "AE.ADBE Opacity",
         "AE.ADBE Motion",
         "AE.ADBE Geometry2",
-        "AE.ADBE Crop"
+        "AE.ADBE AECrop"
     ]);
 });
 
@@ -195,7 +195,7 @@ test("intrinsics at the end of the chain are inserted in front of", async functi
     assert.deepEqual(clips[0].chain.matchNames(), [
         "PR.ADBE Lumetri",
         "AE.ADBE Geometry2",
-        "AE.ADBE Crop",
+        "AE.ADBE AECrop",
         "AE.ADBE Opacity",
         "AE.ADBE Motion"
     ]);
@@ -212,7 +212,7 @@ test("a chain of only intrinsics is appended to", async function () {
         "AE.ADBE Opacity",
         "AE.ADBE Motion",
         "AE.ADBE Geometry2",
-        "AE.ADBE Crop"
+        "AE.ADBE AECrop"
     ]);
 });
 
@@ -332,7 +332,7 @@ test("an effect added after our pair does not cause stacking", async function ()
     assert.equal(mock.records("insert").length, 0, "kein zweites Paar");
     assert.equal(
         clips[0].chain.matchNames().filter(function (n) {
-            return n === "AE.ADBE Crop";
+            return n === "AE.ADBE AECrop";
         }).length,
         1
     );
@@ -877,6 +877,200 @@ test("the plugin version is the same in code, manifest and package", function ()
     const pkg = require("../package.json");
     assert.equal(manifest.version, core.PLUGIN_VERSION);
     assert.equal(pkg.version, core.PLUGIN_VERSION);
+});
+
+// ---------------------------------------------------------------------------
+// Against the real host — Premiere 26.3.2, de_DE, 1080×1080
+// ---------------------------------------------------------------------------
+//
+// These fixtures come from an actual diagnostics dump, not from imagination.
+// Three details in that dump broke the plugin on first contact: the Motion
+// scale is called "Skalieren" and not "Skalierung", the uniform-scale checkbox
+// has a display name of a single space, and the Crop effect's match name is
+// "AE.ADBE AECrop". Everything below exists so none of the three can come back.
+
+test("the real host layout is processed", async function () {
+    setup();
+    const clips = mock.makeRealPair();
+    mock.selectClips(clips, { width: 1080, height: 1080 });
+
+    const report = await core.createSplitScreen({
+        layout: "rows",
+        swap: false,
+        dryRun: false
+    });
+
+    assert.equal(report.fatalError, null, report.fatalError || "");
+    assert.equal(report.processed, 2);
+    assert.equal(report.errors, 0);
+});
+
+test("the real host's effects land behind Auto Reframe", async function () {
+    setup();
+    const clips = mock.makeRealPair();
+    mock.selectClips(clips, { width: 1080, height: 1080 });
+
+    await core.createSplitScreen({ layout: "rows", swap: false, dryRun: false });
+
+    assert.deepEqual(clips[0].chain.matchNames(), [
+        "AE.ADBE Opacity",
+        "AE.ADBE Motion",
+        "AE.ADBE AEFilterAutoFramer",
+        "AE.ADBE Geometry2",
+        "AE.ADBE AECrop"
+    ]);
+});
+
+test("a square sequence is split correctly", async function () {
+    setup();
+    const clips = mock.makeRealPair();
+    mock.selectClips(clips, { width: 1080, height: 1080 });
+
+    await core.createSplitScreen({ layout: "rows", swap: false, dryRun: false });
+
+    // Lower track goes on top: Crop Unten 50 %, position a quarter frame up.
+    const top = ownPairOf(clips[0].chain);
+    assert.deepEqual(cropValues(top.crop), { left: 0, top: 0, right: 0, bottom: 50 });
+    assert.deepEqual(positionOf(top.transform), { x: 0.5, y: 0.25 });
+
+    const bottom = ownPairOf(clips[1].chain);
+    assert.deepEqual(cropValues(bottom.crop), { left: 0, top: 50, right: 0, bottom: 0 });
+    assert.deepEqual(positionOf(bottom.transform), { x: 0.5, y: 0.75 });
+});
+
+test("the Motion scale is found as \"Skalieren\"", async function () {
+    setup();
+    // The name list used to carry only "Skalierung", and the fragment
+    // "skalierung" matches "Skalierungsbreite" — the wrong parameter. The run
+    // failed closed back then; it has to succeed now, by name.
+    const clips = mock.makeRealPair();
+    mock.selectClips(clips, { width: 1080, height: 1080 });
+
+    const report = await core.createSplitScreen({
+        layout: "rows",
+        swap: false,
+        dryRun: true
+    });
+
+    assert.equal(report.fatalError, null, report.fatalError || "");
+    const resolution = (report.results[0].changes || []).find(function (c) {
+        return c.param === "Parameter-Auflösung";
+    });
+    assert.ok(resolution, "die namenlose Checkbox muss gemeldet werden");
+    assert.ok(
+        resolution.value.indexOf("Skalierung") === -1,
+        "die Skalierung muss über den Namen gefunden werden, war: " + resolution.value
+    );
+});
+
+test("the nameless uniform-scale checkbox is found structurally", async function () {
+    setup();
+    const clips = mock.makeRealPair();
+    mock.selectClips(clips, { width: 1080, height: 1080 });
+
+    const report = await core.createSplitScreen({
+        layout: "rows",
+        swap: false,
+        dryRun: true
+    });
+
+    const resolution = (report.results[0].changes || []).find(function (c) {
+        return c.param === "Parameter-Auflösung";
+    });
+    assert.match(resolution.value, /GleichmäßigSkalieren: struktur/);
+});
+
+test("the Motion crop parameters are not mistaken for ours", async function () {
+    setup();
+    // The real Motion effect carries "Links/Oben/Rechts/Unten zuschneiden".
+    // They must stay untouched — we write our own Crop effect.
+    const clips = mock.makeRealPair();
+    mock.selectClips(clips, { width: 1080, height: 1080 });
+
+    await core.createSplitScreen({ layout: "rows", swap: false, dryRun: false });
+
+    const motion = clips[0].motionComponent;
+    for (const name of [
+        "Links zuschneiden",
+        "Oben zuschneiden",
+        "Rechts zuschneiden",
+        "Unten zuschneiden"
+    ]) {
+        assert.equal(motion.param(name).current, 0, name + " wurde verändert");
+        assert.equal(motion.param(name).writeCount, 0);
+    }
+});
+
+test("a keyframed Auto Reframe does not block the run", async function () {
+    setup();
+    // Auto Reframe's own Position is keyframed in the real dump. That is its
+    // business, not ours: it runs before us and its output is simply the
+    // current look.
+    const clips = mock.makeRealPair();
+    mock.selectClips(clips, { width: 1080, height: 1080 });
+
+    const report = await core.createSplitScreen({
+        layout: "rows",
+        swap: false,
+        dryRun: false
+    });
+
+    assert.equal(report.fatalError, null, report.fatalError || "");
+    assert.equal(report.processed, 2);
+});
+
+test("an unreadable Auto Reframe parameter does not block the run", async function () {
+    setup();
+    // "Hash arb data" reads as unusable in the real host. We never look at it,
+    // so it must not matter.
+    const clips = mock.makeRealPair();
+    mock.selectClips(clips, { width: 1080, height: 1080 });
+
+    const report = await core.createSplitScreen({
+        layout: "rows",
+        swap: false,
+        dryRun: false
+    });
+
+    assert.equal(report.errors, 0);
+});
+
+test("the real host's crop match name is resolved exactly", async function () {
+    setup();
+    // The host offers "AE.ADBE AECrop" and a third-party "AE.Impact_Crop_FX".
+    // Picking the third-party one would be a disaster, and relying on
+    // "shortest fragment match" would be luck.
+    const clips = mock.makeRealPair();
+    mock.selectClips(clips, { width: 1080, height: 1080 });
+
+    await core.createSplitScreen({ layout: "rows", swap: false, dryRun: false });
+
+    assert.ok(
+        clips[0].chain.matchNames().indexOf("AE.ADBE AECrop") >= 0,
+        "AECrop muss eingefügt werden"
+    );
+    assert.equal(
+        clips[0].chain.matchNames().indexOf("AE.Impact_Crop_FX"),
+        -1,
+        "der Fremdeffekt darf nicht gewählt werden"
+    );
+});
+
+test("a round trip on the real layout restores the chain", async function () {
+    setup();
+    const clips = mock.makeRealPair();
+    const before = clips[0].chain.matchNames();
+    mock.selectClips(clips, { width: 1080, height: 1080 });
+
+    await core.createSplitScreen({ layout: "rows", swap: false, dryRun: false });
+    await core.removeSplitScreen({ dryRun: false });
+
+    assert.deepEqual(clips[0].chain.matchNames(), before);
+    // And Auto Reframe's framing decision survives untouched.
+    const autoReframe = clips[1].chain.components[2];
+    const adjust = autoReframe.param("Position anpassen").current;
+    assert.equal(adjust.x, 0.712);
+    assert.equal(adjust.y, 0.5);
 });
 
 // ---------------------------------------------------------------------------

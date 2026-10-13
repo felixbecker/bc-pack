@@ -183,6 +183,23 @@ Das ist nicht nur Support-Werkzeug, sondern Kalibrierung: folgende Details sind
 in Adobes Dokumentation nicht belegt und werden daher zur Laufzeit erkannt statt
 fest kodiert.
 
+Stand 13.10.2026 sind die wichtigsten davon in **Premiere 26.3.2 / de_DE**
+durch einen Diagnose-Lauf bestätigt:
+
+| Bestätigt | Wert |
+|---|---|
+| matchName Transformieren | `AE.ADBE Geometry2` |
+| matchName Zuschneiden | `AE.ADBE AECrop` — **nicht** `AE.ADBE Crop` |
+| Position | normalisiert (0‥1) |
+| Prozentwerte | 0‥100 |
+| Intrinsische Komponenten | am Anfang der Kette (Deckkraft, Bewegung), Nutzer-Effekte danach |
+| Bewegungs-Skalierung | heißt `"Skalieren"`, nicht `"Skalierung"` |
+| „Gleichmäßig skalieren" | hat **keinen Namen** (ein Leerzeichen) und wird strukturell erkannt |
+
+Der Host bietet außerdem einen Fremdeffekt `AE.Impact_Crop_FX`, der ebenfalls
+„crop" enthält — deshalb steht `AE.ADBE AECrop` jetzt als exakter Kandidat in
+der Liste und wird nicht über die Fragmentsuche gefunden.
+
 | Unbekannt | Umgang |
 |---|---|
 | matchName von Transformieren / Zuschneiden | zur Laufzeit über `VideoFilterFactory.getMatchNames()` aufgelöst |

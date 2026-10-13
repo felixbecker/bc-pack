@@ -1,6 +1,6 @@
 {
     "name": "split-screener",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "description": "Premiere Pro UXP plugin that builds a 50/50 split screen from two congruent clips on different video tracks.",
     "private": true,
     "scripts": {

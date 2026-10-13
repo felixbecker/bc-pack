@@ -349,13 +349,25 @@ matchName.** Es gibt nur `displayName`, und der ist lokalisiert — im
 Nachbar-Plugin `smooth-auto-frame-uxp` ist dokumentiert, dass er in manchen
 Effekten sogar leer ist.
 
+Wie real das Problem ist, zeigt der Bewegungs-Effekt in Premiere 26.3.2 / de_DE:
+die Skalierung heißt dort `"Skalieren"` und nicht `"Skalierung"`, und
+„Gleichmäßig skalieren" hat als Anzeigenamen **ein Leerzeichen**. Letzteres ist
+über keine Namensliste erreichbar.
+
 Deshalb wird jeder Parameter in bis zu vier Stufen aufgelöst:
 
 ```
 1. exakter Name, Kandidaten in Prioritätsreihenfolge
 2. Teilstring-Fragment, ebenfalls in Prioritätsreihenfolge
 3. Positions-Fallback (nur Zuschneiden, dessen Reihenfolge stabil ist)
-4. strukturelle Probe über die Wertform (nur die Transformieren-Position)
+4. strukturelle Probe über die Wertform:
+   - Transformieren-Position: ein Punkt auf der Framemitte, sonst der erste
+     unbelegte Punkt-Parameter
+   - „Gleichmäßig skalieren": der **einzige** Parameter, der einen echten
+     Boolean liefert. Verlangt wird ein echtes `boolean`, nicht die tolerante
+     Schalter-Lesung — sonst würde der numerische Nullwert von
+     „Anti-Flimmer-Filter" mitzählen und das Ergebnis wäre uneindeutig. Mehr
+     als ein Kandidat heißt Abbruch.
    ↓ keine greift
    ABBRUCH mit Nennung des Parameters und vollständigem Parameter-Dump
 ```
@@ -544,6 +556,16 @@ Brauchen **keinen** Sonderfall. Auto Reframe ist ein Standard-Effekt, läuft als
 vor uns, und sein Ergebnis ist für uns der aktuelle Look, von dem wir die Mitte
 nehmen. Pannt Auto Reframe, wandert das Motiv innerhalb seiner Hälfte — in der
 Regel gewollt; wenn nicht, ist das die Aufgabe von `smooth-auto-frame-uxp`.
+
+### Die Bewegung hat ihren eigenen Beschnitt
+
+Der Bewegungs-Effekt in 26.3.2 führt selbst vier Parameter „Links/Oben/Rechts/
+Unten zuschneiden". Die bleiben unangetastet — wir schreiben in unseren eigenen
+Zuschneiden-Effekt. Theoretisch ließe sich der Splitscreen allein in der
+Bewegung bauen (Position plus deren Beschnitt, beides nach allen Nutzer-Effekten,
+also ohne jede Kompensationsrechnung). Das scheidet aus demselben Grund aus wie
+in [Abschnitt 2](#2-warum-transform-und-crop-und-nicht-bewegung): es würde einen
+vorhandenen Punch-In überschreiben und „Entfernen" wäre nicht mehr verlustfrei.
 
 ### Fremder Beschnitt auf dem Clip
 
