@@ -29,10 +29,7 @@ const el = {};
 
 function cacheElements() {
     el.timingOption = document.getElementById("timingOption");
-    el.fixScale = document.getElementById("fixScale");
-    el.fixRotation = document.getElementById("fixRotation");
     el.dryRun = document.getElementById("dryRun");
-    el.staticValue = document.getElementById("staticValue");
     el.runButton = document.getElementById("runButton");
     el.clearButton = document.getElementById("clearButton");
     el.copyButton = document.getElementById("copyButton");
@@ -134,7 +131,9 @@ function renderReport(report) {
     }
 
     el.summary.classList.add("visible");
-    el.summaryOk.textContent = "Verarbeitet: " + report.processed;
+    el.summaryOk.textContent = report.dryRun
+        ? "Vorgeprüft: " + report.planned
+        : "Verarbeitet: " + report.processed;
     el.summarySkipped.textContent = "Übersprungen: " + report.skipped;
     el.summaryError.textContent = "Fehler: " + report.errors;
 
@@ -162,6 +161,9 @@ function renderReport(report) {
         if (result.reason) {
             entry.appendChild(createLine("reason", result.reason));
         }
+        if (result.steps && result.steps.length) {
+            entry.appendChild(createLine("reason", result.steps.map((step) => step.label).join(" → ")));
+        }
         if (result.changes && result.changes.length) {
             entry.appendChild(createLine("changes", formatChanges(result.changes)));
         }
@@ -180,7 +182,7 @@ function renderReport(report) {
  */
 function readTimingOption() {
     const picker = el.timingOption;
-    if (!picker) return "start";
+    if (!picker) return "playhead";
 
     if (typeof picker.value === "string" && picker.value) {
         return picker.value;
@@ -197,25 +199,21 @@ function readTimingOption() {
         }
     }
 
-    return "start";
+    return "playhead";
 }
 
 function readOptions() {
     return {
         timing: readTimingOption(),
-        fixScale: !!el.fixScale.checked,
-        fixRotation: !!el.fixRotation.checked,
-        dryRun: !!el.dryRun.checked,
-        staticValue: !!el.staticValue.checked
+        dryRun: !!el.dryRun.checked
     };
 }
 
 const TIMING_LABELS = {
     start: "Anfang des Clips",
     middle: "Mitte des Clips",
-    end: "Ende des Clips",
-    playhead: "Aktuelle Abspielposition",
-    average: "Mittelwert aller Keyframes"
+    end: "Letzter sichtbarer Frame",
+    playhead: "Aktuelle Abspielposition"
 };
 
 async function onRun() {
@@ -233,7 +231,7 @@ async function onRun() {
         } else {
             const label = TIMING_LABELS[report.timing] || report.timing;
             setStatus(
-                (options.dryRun ? "Dry-Run abgeschlossen" : "Fertig") +
+                (report.errors ? "Mit Fehlern beendet" : options.dryRun ? "Vorprüfung abgeschlossen" : "Parameter geprüft") +
                     " — Referenz: " +
                     label
             );

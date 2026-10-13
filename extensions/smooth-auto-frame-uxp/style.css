@@ -99,6 +99,10 @@ body {
     color: #e0c468;
 }
 
+.log-entry.status-dry-run .clip-name {
+    color: #a7c7ef;
+}
+
 .log-entry.status-error .clip-name {
     color: #ef8b89;
 }

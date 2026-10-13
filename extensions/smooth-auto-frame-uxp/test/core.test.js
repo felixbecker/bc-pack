@@ -1,945 +1,328 @@
-/*
- * Regression tests for src/core.js.
- *
- * Premiere cannot be driven from CI, so this harness mocks the `premierepro`
- * UXP module (TickTime, PointF, Project/Sequence/TrackItem/Component chain).
- *
- * Crucially the mock is a STATE MACHINE, not just a recorder: actions created
- * by the algorithm are actually applied to the mock parameters when the
- * transaction commits. An earlier version of this harness only logged actions,
- * which is precisely why a bug slipped through where the plugin reported
- * success while Premiere had changed nothing. Tests can therefore now assert
- * the resulting state, not just the intent.
- *
- * No test framework required — plain node:assert.
- *   node test/core.test.js
- */
-const Module = require("module");
-const path = require("path");
-const assert = require("assert");
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const M = require("./mock-premiere.js");
+const { runSmoothAutoFrame: run } = require("../src/core.js");
 
-const PLUGIN_DIR = path.resolve(__dirname, "..");
-
-// ---- Mock Premiere API -----------------------------------------------------
-
-class TickTime {
-    constructor(ticks) { this._t = ticks; }
-    get ticksNumber() { return this._t; }
-    get ticks() { return String(this._t); }
-    get seconds() { return this._t / 254016000000; }
-    add(o) { return new TickTime(this._t + o.ticksNumber); }
-    subtract(o) { return new TickTime(this._t - o.ticksNumber); }
-    divide(d) { return new TickTime(Math.floor(this._t / d)); }
-    static createWithSeconds(s) { return new TickTime(Math.round(s * 254016000000)); }
+function setup(options, sequenceOptions) {
+    const clip = M.makeClip(options);
+    const project = M.install([clip], sequenceOptions);
+    return { clip, project };
 }
-class PointF {
-    constructor(x, y) { this.x = x; this.y = y; }
+const execute = (options) => run({ dryRun: false, ...options });
+function succeeded(report) {
+    assert.equal(report.errors, 0, JSON.stringify(report.results));
+    assert.equal(report.processed, 1);
+}
+function failed(report, stage) {
+    assert.equal(report.processed, 0);
+    assert.equal(report.errors, 1, JSON.stringify(report));
+    assert.equal(report.results[0].stage, stage, JSON.stringify(report.results));
 }
 
-/** Every action the algorithm queued, in order (for assertions). */
-const log = [];
+test("tutorial preserves the chosen frame and holds it throughout a trimmed clip", async () => {
+    const { clip, project } = setup();
+    const originalGenerated = M.clone(clip.generated.keys);
+    const before = clip.generated.at(11);
+    const r = await execute();
+    succeeded(r);
+    assert.deepEqual(M.normalize(clip.adjust.at(10)), before);
+    assert.deepEqual(M.normalize(clip.adjust.at(11.8)), before);
+    assert.equal(clip.adjust.keys.length, 1);
+    assert.equal(clip.adjust.keys[0].time, 11);
+    assert.deepEqual(clip.generated.keys, originalGenerated);
+    assert.deepEqual(M.state.log.map((a) => [a.param, a.kind]), [
+        ["", "set"], ["Position anpassen", "off"], ["Position anpassen", "set"],
+        ["Position anpassen", "on"], ["Position anpassen", "key"]
+    ]);
+    assert.equal(project.history.length, 5);
+    assert.equal(r.undoSteps, 5);
+    assert.equal(r.results[0].steps.at(-1).checks, 2);
+    assert.ok(clip.chainReads > 5);
+});
 
-/**
- * A parameter that actually changes when actions are applied.
- * `options.rejectWrites` simulates Premiere discarding a write — the case that
- * caused the real-world bug.
- */
-class MockParam {
-    constructor(name, keyframes, staticValue, timeVarying, options) {
-        this.displayName = name;
-        this._keys = (keyframes || []).map((k) => ({ t: k.t, v: k.v, interp: null }));
-        this._static = staticValue;
-        this._tv = !!timeVarying;
-        this._reject = !!(options && options.rejectWrites);
+test("raw generated and merged Position are never writable targets", async () => {
+    const { clip } = setup();
+    for (const param of [clip.generated, clip.applied]) {
+        param.createSetTimeVaryingAction = () => { throw new Error("read-only output"); };
+        param.createSetValueAction = () => { throw new Error("read-only output"); };
+        param.createAddKeyframeAction = () => { throw new Error("read-only output"); };
     }
+    succeeded(await execute());
+    assert.notDeepEqual(M.normalize(clip.adjust.at(11)), M.normalize(clip.applied.at(11)));
+});
 
-    isTimeVarying() { return this._tv; }
-    async areKeyframesSupported() { return true; }
+test("a dry run with override off reports readiness limits, never a fabricated target", async () => {
+    const { clip } = setup();
+    const r = await run({ timing: "playhead", dryRun: true });
+    assert.equal(r.planned, 1);
+    assert.equal(r.processed, 0);
+    assert.equal(r.results[0].status, "dry-run");
+    assert.equal(r.results[0].changes, undefined);
+    assert.equal(clip.override.value, false);
+    assert.equal(M.state.log.length, 0);
+});
 
-    getKeyframeListAsTickTimes() {
-        if (!this._tv) return [];
-        return this._keys.map((k) => new TickTime(k.t));
-    }
+test("dry-run defaults on and captures an available editable reference", async () => {
+    setup({ override: true });
+    const r = await run();
+    assert.equal(r.dryRun, true);
+    assert.equal(r.planned, 1);
+    assert.deepEqual(JSON.parse(r.results[0].changes[0].value), { x: 0.6, y: 0.7 });
+    assert.equal(M.state.log.length, 0);
+});
 
-    async getStartValue() {
-        if (!this._tv) return this._static;
-        return this._keys.length ? this._keys[0].v : this._static;
-    }
+test("manually enabled override is not toggled again; rerunning does not regenerate the path", async () => {
+    const { clip } = setup({ override: true });
+    succeeded(await execute());
+    assert.equal(M.state.log.some((a) => a.param === ""), false);
+    const first = M.clone(clip.adjust.keys);
+    const second = await execute();
+    succeeded(second);
+    assert.deepEqual(M.clone(clip.adjust.keys), first);
+    assert.equal(second.undoSteps, 4);
+});
 
-    async getValueAtTime(time) {
-        if (!this._tv) return this._static;
-        const hit = this._keys.find((k) => k.t === time.ticksNumber);
-        if (hit) return hit.v;
-        return this._keys.length ? this._keys[0].v : this._static;
-    }
+test("an empty editable path aborts after override, leaving generated and adjust data untouched", async () => {
+    const { clip } = setup({ transfer: false });
+    const generated = M.clone(clip.generated.keys);
+    const r = await execute();
+    failed(r, "editable-path");
+    assert.equal(r.undoSteps, 1);
+    assert.match(r.results[0].reason, /manuell aktivieren/);
+    assert.deepEqual(clip.generated.keys, generated);
+    assert.deepEqual(clip.adjust.value, { x: 0, y: 0 });
+    assert.equal(M.state.log.length, 1);
+});
 
-    createKeyframe(v) { return { value: v, position: null }; }
+test("delayed path availability causes read-only waiting, not repeated writes", async () => {
+    setup({ transferDelay: 150 });
+    const r = await execute();
+    succeeded(r);
+    assert.ok(r.results[0].pathReadAttempts > 1);
+    assert.equal(M.state.log.filter((a) => a.param === "").length, 1);
+    assert.equal(M.state.log.length, 5);
+});
 
-    _action(record, apply) {
-        return { record: record, apply: this._reject ? () => {} : apply };
-    }
+test("pure vertical motion is frozen using Adjust Position", async () => {
+    const { clip } = setup({ keys: [
+        { time: 10, value: { x: 0.5, y: 0.4 } }, { time: 12, value: { x: 0.5, y: 0.8 } }
+    ] });
+    succeeded(await execute());
+    assert.equal(clip.adjust.at(10).x, 0.5);
+    assert.ok(Math.abs(clip.adjust.at(12).y - 0.6) < 1e-10);
+});
 
-    createSetTimeVaryingAction(b) {
-        return this._action(
-            { kind: "setTimeVarying", param: this.displayName, value: b },
-            () => {
-                this._tv = b;
-                // Turning keyframing off drops the keyframes, as in Premiere.
-                if (!b) this._keys = [];
-            }
-        );
-    }
+test("bare Position is not a fallback for missing Adjust Position", async () => {
+    const { clip } = setup();
+    clip.adjust.displayName = "Unbekannter Parameter";
+    const r = await execute();
+    failed(r, "discovery");
+    assert.match(r.results[0].reason, /Position anpassen/);
+    assert.equal(M.state.log.length, 0);
+});
 
-    createSetValueAction(kf, safe) {
-        return this._action(
-            { kind: "setValue", param: this.displayName, value: kf.value, safe: safe },
-            () => { this._static = kf.value; }
-        );
-    }
+test("measured blank override layout touches index 8, never the other booleans", async () => {
+    const { clip } = setup();
+    const r = await execute();
+    succeeded(r);
+    assert.equal(r.results[0].overrideResolvedBy, "index-26.3-layout");
+    assert.equal(clip.effect.params[0].value, false);
+    assert.equal(clip.effect.params[4].value, true);
+    assert.equal(clip.override.value, true);
+});
 
-    createAddKeyframeAction(kf) {
-        const pos = kf.position ? kf.position.ticksNumber : null;
-        return this._action(
-            { kind: "addKeyframe", param: this.displayName, value: kf.value, position: pos },
-            () => {
-                this._tv = true;
-                this._keys = this._keys.filter((k) => k.t !== pos);
-                this._keys.push({ t: pos, v: kf.value, interp: null });
-                this._keys.sort((a, b) => a.t - b.t);
-            }
-        );
-    }
+test("a changed anonymous parameter layout is not guessed", async () => {
+    const { clip } = setup();
+    clip.generated.displayName = "Different layout";
+    failed(await execute(), "discovery");
+    assert.equal(M.state.log.length, 0);
+});
 
-    createRemoveKeyframeRangeAction(a, b, updateUI) {
-        return this._action(
-            {
-                kind: "removeRange", param: this.displayName,
-                from: a.ticksNumber, to: b.ticksNumber, updateUI: updateUI
-            },
-            () => {
-                this._keys = this._keys.filter(
-                    (k) => k.t < a.ticksNumber || k.t > b.ticksNumber
-                );
-            }
-        );
-    }
+test("named English parameters work without index fallback", async () => {
+    const { clip } = setup({ namedOverride: true });
+    clip.override.displayName = "Overwrite generated path";
+    clip.adjust.displayName = "Adjust Position";
+    const r = await execute();
+    succeeded(r);
+    assert.equal(r.results[0].overrideResolvedBy, "name");
+});
 
-    createSetInterpolationAtKeyframeAction(t, mode) {
-        return this._action(
-            { kind: "setInterp", param: this.displayName, at: t.ticksNumber, mode: mode },
-            () => {
-                const hit = this._keys.find((k) => k.t === t.ticksNumber);
-                if (hit) hit.interp = mode;
-            }
-        );
-    }
+test("wrong override type and unsupported keyframing fail before mutations", async () => {
+    let s = setup();
+    s.clip.override.value = 42;
+    failed(await execute(), "reference-time");
+    assert.equal(M.state.log.length, 0);
+    s = setup();
+    s.clip.adjust.areKeyframesSupported = async () => false;
+    failed(await execute(), "reference-time");
+    assert.equal(M.state.log.length, 0);
+});
+
+for (const [kind, stage, count] of [
+    ["off", "stopwatch-off", 2], ["set", "static-value", 3],
+    ["on", "stopwatch-on", 4], ["key", "verify", 5]
+]) {
+    test("discarded " + kind + " action is detected at its checkpoint", async () => {
+        const { clip } = setup();
+        clip.adjust.reject = kind;
+        const r = await execute();
+        failed(r, stage);
+        assert.equal(r.undoSteps, count);
+        assert.equal(M.state.log.length, count);
+        assert.match(r.results[0].reason, /Rückgängig/);
+    });
 }
 
-class MockComponent {
-    constructor(matchName, displayName, params) {
-        this._m = matchName; this._d = displayName; this._p = params;
+test("rejected override never starts modifying position", async () => {
+    const { clip } = setup(); clip.override.reject = "set";
+    failed(await execute(), "editable-path");
+    assert.equal(M.state.log.length, 1);
+});
+
+test("false transaction / addAction results and thrown transactions are not successes", async () => {
+    for (const prop of ["reject", "rejectAdd", "throwAt"]) {
+        const { project } = setup(); project[prop] = "off";
+        const r = await execute();
+        failed(r, "stopwatch-off");
+        assert.equal(r.undoSteps, 1);
+        assert.equal(M.state.log.length, 1);
     }
-    async getMatchName() { return this._m; }
-    async getDisplayName() { return this._d; }
-    getParamCount() { return this._p.length; }
-    getParam(i) { return this._p[i]; }
-}
+});
 
-class MockChain {
-    constructor(components) { this._c = components; }
-    getComponentCount() { return this._c.length; }
-    getComponentAtIndex(i) { return this._c[i]; }
-}
+test("one keyframe with the wrong value does not pass verification", async () => {
+    const { clip } = setup();
+    clip.adjust.afterWrite = (kind) => { if (kind === "key") clip.adjust.keys[0].value = { x: 0.99, y: 0.99 }; };
+    failed(await execute(), "verify");
+});
 
-class MockTrackItem {
-    constructor(name, chain, inTicks, outTicks, startTicks) {
-        this._n = name; this._chain = chain;
-        this._in = inTicks; this._out = outTicks; this._start = startTicks;
-        this.chainFetchCount = 0;
-    }
-    async getName() { return this._n; }
-    async getComponentChain() { this.chainFetchCount++; return this._chain; }
-    async getInPoint() { return new TickTime(this._in); }
-    async getOutPoint() { return new TickTime(this._out); }
-    async getStartTime() { return new TickTime(this._start); }
-}
+test("one keyframe at the wrong time does not pass verification", async () => {
+    const { clip } = setup();
+    clip.adjust.afterWrite = (kind) => { if (kind === "key") clip.adjust.keys[0].time += 0.04; };
+    failed(await execute(), "verify");
+});
 
-function makeProject(sequence) {
-    return {
-        async getActiveSequence() { return sequence; },
-        lockedAccess(cb) { log.push({ kind: "LOCK_ENTER" }); cb(); log.push({ kind: "LOCK_EXIT" }); },
-        executeTransaction(cb, undoString) {
-            log.push({ kind: "TX_BEGIN", undoString });
-            const queued = [];
-            cb({
-                addAction: (a) => {
-                    log.push(a.record);
-                    queued.push(a);
-                }
-            });
-            // Commit: apply every queued action, like Premiere would.
-            for (const action of queued) action.apply();
-            log.push({ kind: "TX_COMMIT" });
-            return true;
-        }
+test("a still-moving merged output fails despite a correctly frozen editable parameter", async () => {
+    setup({ ignoreOverride: true });
+    const r = await execute();
+    failed(r, "verify");
+    assert.match(r.results[0].reason, /Angewandte Position/);
+    assert.ok(r.results[0].verificationSamples.length);
+});
+
+test("override changing the reference framing is reported before deleting the editable keys", async () => {
+    const { clip } = setup();
+    const original = clip.applied.at;
+    clip.applied.at = (seconds) => {
+        const p = original(seconds);
+        return { x: p.x + (clip.override.value ? 0.1 : 0), y: p.y };
     };
-}
+    const r = await execute();
+    failed(r, "editable-path");
+    assert.match(r.results[0].reason, /Referenzausschnitt verändert/);
+    assert.equal(M.state.log.length, 1);
+});
 
-let currentProject = null;
-const pproMock = {
-    PointF,
-    TickTime,
-    Project: { async getActiveProject() { return currentProject; } }
-};
-
-// ---- Intercept require("premierepro") --------------------------------------
-const origLoad = Module._load;
-Module._load = function (request) {
-    if (request === "premierepro") return pproMock;
-    return origLoad.apply(this, arguments);
-};
-
-const { runSmoothAutoFrame } = require(path.join(PLUGIN_DIR, "src/core.js"));
-
-// ---- Fixtures --------------------------------------------------------------
-const S = (s) => Math.round(s * 254016000000);
-
-/** Builds a single-clip project. Returns the parts for assertions. */
-function makeScenario(params, opts) {
-    const options = opts || {};
-    const comp = new MockComponent(
-        options.matchName || "AE.ADBE AutoReframe",
-        options.displayName || "Auto Reframe",
-        params
-    );
-    const chain = new MockChain(
-        options.extraComponents ? options.extraComponents.concat([comp]) : [comp]
-    );
-    const clip = new MockTrackItem(
-        options.clipName || "clip.mov",
-        chain,
-        options.inPoint !== undefined ? options.inPoint : S(1),
-        options.outPoint !== undefined ? options.outPoint : S(3),
-        options.start !== undefined ? options.start : S(0)
-    );
-    currentProject = makeProject({
-        async getSelection() { return { async getTrackItems() { return [clip]; } }; },
-        async getPlayerPosition() { return new TickTime(options.playhead || 0); }
-    });
-    return { comp, chain, clip };
-}
-
-/** The standard tripod-drift scenario: Position drifts, Rotation constant 0. */
-function buildScenario() {
-    const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
-    const position = new MockParam("Position", [
-        { t: S(1), v: new PointF(0.50, 0.50) },
-        { t: S(2), v: new PointF(0.54, 0.50) },
-        { t: S(3), v: new PointF(0.60, 0.50) }
-    ], null, true);
-    const scale = new MockParam("Skalierung", [
-        { t: S(1), v: 1.0 }, { t: S(3), v: 1.2 }
-    ], null, true);
-    const rotation = new MockParam("Drehung", [], 0, false);
-
-    const parts = makeScenario([override, position, scale, rotation], {
-        clipName: "tripod_shot.mov",
-        inPoint: S(1), outPoint: S(3), start: S(10), playhead: S(11)
-    });
-    return Object.assign({ override, position, scale, rotation }, parts);
-}
-
-/** Position with a given raw value shape, plus a working override checkbox. */
-function buildShapeScenario(rawValue, paramOptions) {
-    const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
-    const position = new MockParam("Position", [{ t: S(1), v: rawValue }], null, true, paramOptions);
-    const parts = makeScenario([override, position], { clipName: "shape.mov" });
-    return Object.assign({ override, position }, parts);
-}
-
-/**
- * Models "Position" as a DERIVED readout of the adjust parameter: it reports
- * keyframes only while the source does. That is the behaviour the plugin now
- * verifies — freezing the adjust parameter must settle the applied position.
- * If real Premiere behaves differently, the verification reports it.
- */
-function linkAppliedPosition(applied, source) {
-    applied.isTimeVarying = function () { return source.isTimeVarying(); };
-    applied.getKeyframeListAsTickTimes = function () {
-        return source.getKeyframeListAsTickTimes();
+test("post-write repopulation is detected by the second observation without another write", async () => {
+    const { clip } = setup();
+    clip.adjust.afterWrite = (kind) => {
+        if (kind === "key") setTimeout(() => { clip.adjust.keys = M.clone(clip.generated.keys); }, 100);
     };
-    return applied;
-}
+    const r = await execute();
+    failed(r, "verify");
+    assert.equal(M.state.log.length, 5);
+});
 
-/**
- * Value a parameter was pinned to. Default mode leaves exactly ONE keyframe
- * (the tutorial's workflow), static mode leaves none.
- */
-function pinnedValue(param) {
-    if (param._keys.length === 1) return param._keys[0].v;
-    if (param._keys.length === 0) return param._static;
-    return null;
-}
-
-/** Asserts a parameter no longer animates and holds the expected x value. */
-function assertPinned(param, expectedX, label) {
-    const name = label || param.displayName;
-    assert.ok(param._keys.length <= 1,
-        name + " animiert noch (" + param._keys.length + " Keyframes)");
-    const v = pinnedValue(param);
-    assert.ok(v && typeof v.x === "number",
-        name + ": kein Punktwert (" + JSON.stringify(v) + ")");
-    assert.ok(Math.abs(v.x - expectedX) < 1e-6,
-        name + ": erwartet x=" + expectedX + ", war " + v.x);
-}
-
-function reset() { log.length = 0; }
-
-// ---- Tests -----------------------------------------------------------------
-(async () => {
-    let failures = 0;
-    const t = async (name, fn) => {
-        reset();
-        try { await fn(); console.log("  PASS  " + name); }
-        catch (e) { failures++; console.log("  FAIL  " + name + "\n        " + e.message); }
+test("a host-created key when enabling the stopwatch is accepted only at the intended time/value", async () => {
+    const { clip } = setup();
+    clip.adjust.afterWrite = (kind) => {
+        if (kind === "on") clip.adjust.keys = [{ time: 11, value: clip.adjust.value }];
     };
-
-    console.log("\n--- UXP core.js Funktionstest (gemockte Premiere-API) ---");
-
-    await t("Dry-Run schreibt nichts, meldet aber den Plan", async () => {
-        const s = buildScenario();
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: true });
-        assert.strictEqual(r.processed, 1, "processed");
-        assert.strictEqual(log.length, 0, "es wurden Actions erzeugt obwohl Dry-Run");
-        assert.strictEqual(s.position._keys.length, 3, "Keyframes wurden verändert");
-        assert.strictEqual(s.override._static, false, "Override wurde verändert");
-        assert.ok(r.results[0].params, "Parameter-Dump fehlt im Dry-Run");
-    });
-
-    await t("Override wird zuerst gesetzt, in eigener Transaktion", async () => {
-        const s = buildScenario();
-        await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        const txs = log.filter((l) => l.kind === "TX_BEGIN");
-        assert.strictEqual(txs.length, 2, "erwartet 2 Transaktionen, waren " + txs.length);
-        const firstOverride = log.findIndex((l) => l.param === "Erzeugten Pfad überschreiben");
-        const firstPosition = log.findIndex((l) => l.param === "Position");
-        assert.ok(firstOverride < firstPosition, "Override wurde nicht zuerst gesetzt");
-        assert.strictEqual(s.override._static, true, "Override-Checkbox ist nicht aktiv");
-    });
-
-    await t("Standardmodus entfernt Keyframes wirklich und meldet Erfolg", async () => {
-        const s = buildScenario();
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-        assert.strictEqual(r.processed, 1);
-        // Standard: genau EIN Keyframe bleibt, wie im Tutorial.
-        assert.strictEqual(s.position._keys.length, 1, "erwartet genau 1 Keyframe");
-        assertPinned(s.position, 0.50, "Position");
-        const change = r.results[0].changes[0];
-        assert.strictEqual(change.keyframesBefore, 3);
-        // Der Endzustand wird jetzt in Phase 3 geprueft, nicht pro Change.
-        const after = r.results[0].paramsAfter.find((x) => x.name === "Position");
-        assert.strictEqual(after.keyframes, 1, "erwartet genau 1 Keyframe in paramsAfter");
-    });
-
-    await t("REGRESSION: verworfener Schreibvorgang wird als Fehler gemeldet", async () => {
-        // Premiere ignoriert die Writes (rejectWrites) -> das Plugin darf NICHT
-        // Erfolg melden. Genau dieser Fall trat in echtem Premiere auf.
-        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false, { rejectWrites: true });
-        const position = new MockParam("Position", [
-            { t: S(1), v: new PointF(0.72, 0.5) }
-        ], null, true, { rejectWrites: true });
-        makeScenario([override, position], { clipName: "stubborn.mov" });
-
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.processed, 0, "Erfolg gemeldet, obwohl nichts passiert ist!");
-        assert.strictEqual(r.errors, 1, "kein Fehler gemeldet");
-        const reason = r.results[0].reason;
-        assert.ok(
-            reason.includes("nicht übernommen") || reason.includes("nicht aktivieren"),
-            "Meldung: " + reason
-        );
-        assert.ok(reason.includes("Checkbox") || reason.includes("animiert"),
-            "Meldung nennt die Ursache nicht: " + reason);
-        assert.ok(reason.includes("Erzeugten Pfad"), "Parameter-Dump fehlt: " + reason);
-        assert.ok(reason.includes("nichts geschrieben") || r.processed === 0,
-            "unklar, ob geschrieben wurde: " + reason);
-    });
-
-    await t("Fehlende Override-Checkbox: Fehler statt stillem Weitermachen", async () => {
-        const position = new MockParam("Position", [{ t: S(1), v: new PointF(0.5, 0.5) }], null, true);
-        makeScenario([position], { clipName: "no_override.mov" });
-
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 1, "erwartet 1 Fehler");
-        assert.strictEqual(r.processed, 0);
-        assert.strictEqual(log.length, 0, "es wurde geschrieben ohne Override-Parameter");
-        const reason = r.results[0].reason;
-        assert.ok(reason.includes("Erzeugten Pfad überschreiben"), reason);
-        assert.ok(reason.includes("nicht gefunden"), reason);
-        assert.ok(r.results[0].params, "Parameter-Dump fehlt");
-    });
-
-    await t("Override wird per Fragment gefunden, auch bei unbekanntem Label", async () => {
-        const override = new MockParam("Generierten Verlauf überschreiben lassen", [], false, false);
-        const position = new MockParam("Position", [{ t: S(1), v: new PointF(0.3, 0.4) }], null, true);
-        makeScenario([override, position], { clipName: "fuzzy.mov" });
-
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-        assert.strictEqual(override._static, true, "Override nicht gesetzt");
-    });
-
-    // --- Magic-String-Lookups müssen laut scheitern, nicht still ----------
-
-    await t("Angefordertes Scale nicht auffindbar -> Fehler, kein stilles Überspringen", async () => {
-        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
-        const position = new MockParam("Position", [{ t: S(1), v: new PointF(0.5, 0.5) }], null, true);
-        // Kein Scale-Parameter vorhanden, aber der Nutzer hat ihn angehakt.
-        makeScenario([override, position], { clipName: "no_scale.mov" });
-
-        const r = await runSmoothAutoFrame({ timing: "start", fixScale: true, dryRun: false });
-        assert.strictEqual(r.errors, 1, "erwartet 1 Fehler, war " + r.errors);
-        assert.strictEqual(r.processed, 0, "Erfolg gemeldet trotz fehlendem Parameter");
-        assert.ok(r.results[0].reason.includes("Skalierung"), r.results[0].reason);
-        assert.ok(r.results[0].params, "Parameter-Dump fehlt");
-        assert.strictEqual(log.length, 0, "es wurde geschrieben, obwohl der Plan scheiterte");
-    });
-
-    await t("Angeforderte Rotation nicht auffindbar -> Fehler", async () => {
-        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
-        const position = new MockParam("Position", [{ t: S(1), v: new PointF(0.5, 0.5) }], null, true);
-        makeScenario([override, position], { clipName: "no_rot.mov" });
-
-        const r = await runSmoothAutoFrame({ timing: "start", fixRotation: true, dryRun: false });
-        assert.strictEqual(r.errors, 1);
-        assert.ok(r.results[0].reason.includes("Drehung"), r.results[0].reason);
-    });
-
-    await t("Nicht angefordertes Scale fehlt -> kein Fehler", async () => {
-        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
-        const position = new MockParam("Position", [{ t: S(1), v: new PointF(0.5, 0.5) }], null, true);
-        makeScenario([override, position], { clipName: "ok.mov" });
-
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-        assert.strictEqual(r.processed, 1);
-    });
-
-    await t("Falsch getroffene Checkbox (kein Boolean) -> Fehler", async () => {
-        // Ein Zahlenparameter, dessen Name das Fragment "override" enthaelt.
-        const fake = new MockParam("Override amount", [], 42, false);
-        const position = new MockParam("Position", [{ t: S(1), v: new PointF(0.5, 0.5) }], null, true);
-        makeScenario([fake, position], { clipName: "wrong_param.mov" });
-
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 1, "erwartet 1 Fehler");
-        const reason = r.results[0].reason;
-        assert.ok(reason.includes("Wahrheitswert"), "Meldung: " + reason);
-        assert.ok(reason.includes("42"), "gelesener Wert fehlt: " + reason);
-        assert.strictEqual(log.length, 0, "es wurde geschrieben");
-    });
-
-    await t("Clip ohne Auto Reframe nennt die vorhandenen Effekte", async () => {
-        const other = new MockComponent("AE.ADBE Opacity", "Deckkraft", []);
-        const other2 = new MockComponent("AE.ADBE Motion", "Bewegung", []);
-        const clip = new MockTrackItem("plain.mov", new MockChain([other, other2]), S(0), S(2), S(0));
-        currentProject = makeProject({
-            async getSelection() { return { async getTrackItems() { return [clip]; } }; },
-            async getPlayerPosition() { return new TickTime(0); }
-        });
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.skipped, 1);
-        const reason = r.results[0].reason;
-        assert.ok(reason.includes("Deckkraft") && reason.includes("Bewegung"),
-            "Effektliste fehlt: " + reason);
-        assert.ok(r.results[0].components, "components-Feld fehlt");
-    });
-
-    await t("REIHENFOLGE: Werte werden erst nach Aktivieren der Checkbox gelesen", async () => {
-        /*
-         * Exakt das in Premiere 26.3.2 beobachtete Verhalten: solange die
-         * Checkbox aus ist, meldet "Position anpassen" 0 Keyframes und
-         * timeVarying=false. Erst nach dem Aktivieren erscheinen die 3
-         * Keyframes. Wer vorher liest, bekommt den falschen Referenzwert.
-         */
-        const gate = { open: false };
-
-        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
-        const origOverrideSet = override.createSetValueAction.bind(override);
-        override.createSetValueAction = function (kf, safe) {
-            const action = origOverrideSet(kf, safe);
-            const origApply = action.apply;
-            action.apply = () => { origApply(); if (kf.value === true) gate.open = true; };
-            return action;
-        };
-
-        const position = new MockParam("Position anpassen", [
-            { t: S(1), v: new PointF(0.81, 0.5) },
-            { t: S(2), v: new PointF(0.85, 0.5) },
-            { t: S(3), v: new PointF(0.90, 0.5) }
-        ], new PointF(0.0, 0.0), true);
-        // Gesperrt: ohne offene Checkbox keine Keyframes, kein timeVarying.
-        // Mit offener Checkbox gilt der echte Zustand des Parameters.
-        const origTv = position.isTimeVarying.bind(position);
-        position.isTimeVarying = function () { return gate.open && origTv(); };
-        const origList = position.getKeyframeListAsTickTimes.bind(position);
-        position.getKeyframeListAsTickTimes = function () {
-            return gate.open ? origList() : [];
-        };
-
-        makeScenario([override, position], { clipName: "gated.mov" });
-
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-        assert.strictEqual(r.processed, 1);
-        // Der erste Keyframe-Wert (0.81) ist nur sichtbar, wenn NACH dem
-        // Aktivieren gelesen wurde. Vorher waere der statische 0.0 gelesen worden.
-        assertPinned(position, 0.81, "Position anpassen (zu frueh gelesen?)");
-    });
-
-    await t("Checkbox ohne Anzeigenamen wird per bekanntem Index aufgelöst", async () => {
-        /*
-         * Reale Lage in AE.ADBE AEFilterAutoFramer (Premiere 26.3.2, de_DE):
-         * die Override-Checkbox liegt auf Index 8 und hat den Anzeigenamen "".
-         * Index 0 (" ") und Index 4 ("Uniform Scale") sind ebenfalls Booleans,
-         * duerfen aber NICHT getroffen werden.
-         */
-        const p = [];
-        p[0] = new MockParam(" ", [], false, false);
-        p[1] = new MockParam("Motion-Tracking", [], 1, false);
-        p[2] = new MockParam("Position", [{ t: S(1), v: new PointF(0.68, 0.5) }], null, true);
-        p[3] = new MockParam("Scale (Merged)", [], 100, false);
-        p[4] = new MockParam("Uniform Scale", [], true, false);
-        p[5] = new MockParam("Anchor Point", [], new PointF(0.5, 0.5), false);
-        p[6] = new MockParam("Position anpassen", [{ t: S(1), v: new PointF(0.42, 0.5) }], null, true);
-        p[7] = new MockParam("Generated Keyframes", [{ t: S(1), v: new PointF(0.5, 0.5) }], null, true);
-        p[8] = new MockParam("", [], false, false);   // <- die Checkbox
-        p[9] = new MockParam("Hash arb data", [], null, false);
-        p[10] = new MockParam("Reframing für Versatz", [], new PointF(0, 0), false);
-        p[11] = new MockParam("Reframing für Skalierung", [], 100, false);
-        p[12] = new MockParam("Scale (Auto Generated)", [], 100, false);
-        p[13] = new MockParam("Reframing für Drehung", [], 0, false);
-        linkAppliedPosition(p[2], p[6]);
-
-        makeScenario(p, {
-            matchName: "AE.ADBE AEFilterAutoFramer",
-            displayName: "Auto Reframe",
-            clipName: "real_layout.mov"
-        });
-
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-        assert.strictEqual(r.processed, 1);
-        assert.strictEqual(p[8]._static, true, "Checkbox auf Index 8 nicht gesetzt");
-        assert.strictEqual(p[0]._static, false, "falsche Checkbox (Index 0) gesetzt");
-        assert.strictEqual(p[4]._static, true, "Uniform Scale veraendert");
-        // Bearbeitet werden muss "Position anpassen" (Index 6), nicht Index 2.
-        const changedNames = r.results[0].changes.map((c) => c.param);
-        assert.ok(changedNames.includes("Position anpassen"),
-            "Position anpassen fehlt: " + changedNames);
-        assert.ok(p[6]._keys.length <= 1, "Index 6 animiert noch");
-        assert.ok(p[2]._keys.length <= 1, "Index 2 animiert noch");
-        assert.strictEqual(r.results[0].overrideResolvedBy, "index",
-            "Auflösungsart nicht protokolliert");
-        assert.ok(r.results[0].paramsAfter, "paramsAfter fehlt");
-    });
-
-    await t("REGRESSION: verzögerte Keyframe-Übertragung wird abgewartet", async () => {
-        /*
-         * Premiere uebertraegt den erzeugten Pfad NICHT synchron auf den
-         * bearbeitbaren Parameter, wenn die Checkbox committed wird. Eine
-         * frühere Fassung las sofort danach, bekam 0 Keyframes und den
-         * neutralen Wert 0.5 — und fror diesen fest, mit Erfolgsmeldung.
-         */
-        let committedAt = null;
-        let reveals = 0;
-
-        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
-        const origSet = override.createSetValueAction.bind(override);
-        override.createSetValueAction = function (kf, safe) {
-            const action = origSet(kf, safe);
-            const origApply = action.apply;
-            action.apply = () => { origApply(); if (kf.value === true) committedAt = Date.now(); };
-            return action;
-        };
-
-        const adjust = new MockParam("Position anpassen", [
-            { t: S(1), v: new PointF(0.6889, 0.5) },
-            { t: S(2), v: new PointF(0.72, 0.5) }
-        ], new PointF(0.5, 0.5), true);
-
-        // Keyframes erscheinen erst ~250 ms nach dem Commit.
-        const origList = adjust.getKeyframeListAsTickTimes.bind(adjust);
-        const origTv = adjust.isTimeVarying.bind(adjust);
-        const revealed = () => committedAt !== null && Date.now() - committedAt >= 250;
-        adjust.getKeyframeListAsTickTimes = function () {
-            return revealed() ? origList() : [];
-        };
-        adjust.isTimeVarying = function () {
-            // getKeyframeTimes() bricht hier ab, wenn false -> hier zaehlen.
-            if (!revealed()) { reveals++; return false; }
-            return origTv();
-        };
-
-        const generated = new MockParam("Generated Keyframes", [
-            { t: S(1), v: new PointF(0.5, 0.5) },
-            { t: S(2), v: new PointF(0.5, 0.5) }
-        ], null, true);
-
-        const applied = new MockParam("Position", [], new PointF(0.6889, 0.5), false);
-        linkAppliedPosition(applied, adjust);
-
-        makeScenario([override, applied, adjust, generated], { clipName: "delayed.mov" });
-
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-        assert.ok(reveals > 0, "es wurde nie zu frueh gelesen - Test greift nicht");
-        /*
-         * Entscheidend: der ECHTE Keyframe-Wert, nicht der neutrale 0.5.
-         * Beim ersten Durchlauf ist der Parameter noch leer; die verzoegert
-         * erscheinenden Keyframes werden in einem spaeteren Durchlauf erfasst.
-         */
-        assertPinned(adjust, 0.6889, "Position anpassen");
-        assert.ok(r.results[0].passes >= 2,
-            "nur " + r.results[0].passes + " Durchlauf - verzoegerte Keyframes nicht erfasst");
-    });
-
-    await t("Nur der erzeugte Pfad traegt Keyframes -> nur dieser wird eingefroren", async () => {
-        /*
-         * Realfall Premiere 26.3.2: beim programmatischen Setzen der Checkbox
-         * überträgt Premiere den erzeugten Pfad NICHT auf "Position anpassen".
-         * Der Referenzwert muss dann aus "Generated Keyframes" kommen —
-         * geschrieben wird weiterhin "Position anpassen".
-         */
-        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
-        // Ziel bleibt dauerhaft leer (keine Übertragung).
-        const adjust = new MockParam("Position anpassen", [], new PointF(0.5, 0.5), false);
-        const generated = new MockParam("Generated Keyframes", [
-            { t: S(1), v: new PointF(0.6889, 0.5) },
-            { t: S(2), v: new PointF(0.80, 0.5) }
-        ], null, true);
-        const applied = new MockParam("Position", [], new PointF(0.6889, 0.5), false);
-
-        makeScenario([override, applied, adjust, generated], { clipName: "notransfer.mov" });
-
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-        assert.strictEqual(r.processed, 1);
-
-        /*
-         * "Position anpassen" und "Position" tragen hier keine Keyframes, also
-         * gibt es dort nichts einzufrieren - sie werden uebersprungen. Nur der
-         * erzeugte Pfad traegt die Bewegung und wird behandelt.
-         */
-        const names = r.results[0].changes.map((c) => c.param);
-        assert.deepStrictEqual(names, ["Generated Keyframes"],
-            "erwartet nur den erzeugten Pfad: " + names);
-        const change = r.results[0].changes[0];
-        assert.strictEqual(change.readFrom, "target", "Quelle: " + change.readFrom);
-        assert.strictEqual(change.keyframesBefore, 2);
-        assertPinned(generated, 0.6889, "Generated Keyframes");
-        // Unbeteiligte Parameter bleiben unberuehrt.
-        assert.ok(Math.abs(adjust._static.x - 0.5) < 1e-9,
-            "Position anpassen wurde ungefragt veraendert: " + adjust._static.x);
-    });
-
-    await t("REGRESSION: nachträglich befüllter Geschwisterparameter wird erfasst", async () => {
-        /*
-         * Realfall Premiere 26.3.2 (d7-Log): "Position" und "Generated
-         * Keyframes" wurden erfolgreich eingefroren, danach hielt
-         * "Position anpassen" 32 Keyframes und das Bild wackelte weiter.
-         * Premiere befuellt den Parameter asynchron NACH dem Schreiben.
-         * Mehrere Durchlaeufe muessen das einsammeln.
-         */
-        let frozenOnce = false;
-
-        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
-        const applied = new MockParam("Position", [
-            { t: S(1), v: new PointF(0.70, 0.5) },
-            { t: S(2), v: new PointF(0.78, 0.5) }
-        ], null, true);
-        const generated = new MockParam("Generated Keyframes", [
-            { t: S(1), v: new PointF(0.70, 0.5) },
-            { t: S(2), v: new PointF(0.78, 0.5) }
-        ], null, true);
-        // Startet leer; wird befuellt, sobald "Position" eingefroren wurde.
-        const adjust = new MockParam("Position anpassen", [], new PointF(0.5, 0.5), false);
-
-        const origAppliedAdd = applied.createAddKeyframeAction.bind(applied);
-        applied.createAddKeyframeAction = function (kf) {
-            const action = origAppliedAdd(kf);
-            const origApply = action.apply;
-            action.apply = () => {
-                origApply();
-                if (!frozenOnce) {
-                    frozenOnce = true;
-                    // Premiere schiebt den Pfad jetzt nach.
-                    adjust._tv = true;
-                    adjust._keys = [
-                        { t: S(1), v: new PointF(0.70, 0.5), interp: null },
-                        { t: S(2), v: new PointF(0.78, 0.5), interp: null }
-                    ];
-                }
-            };
-            return action;
-        };
-
-        makeScenario([override, applied, adjust, generated], { clipName: "sibling.mov" });
-
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-        assert.strictEqual(r.processed, 1);
-        assert.ok(frozenOnce, "Nachbefuellung wurde nie ausgeloest");
-        assert.ok(r.results[0].passes >= 2,
-            "nur " + r.results[0].passes + " Durchlauf - Geschwister nicht erfasst");
-        // Nichts darf mehr animieren.
-        assertPinned(applied, 0.70, "Position");
-        assertPinned(adjust, 0.70, "Position anpassen");
-        assertPinned(generated, 0.70, "Generated Keyframes");
-    });
-
-    await t("Referenz 'end' nimmt den LETZTEN Keyframe-Wert", async () => {
-        const s = buildScenario();
-        await runSmoothAutoFrame({ timing: "end", dryRun: false });
-        assertPinned(s.position, 0.60, "Position (end)");
-    });
-
-    await t("Mittelwert-Modus mittelt PointF korrekt", async () => {
-        const s = buildScenario();
-        await runSmoothAutoFrame({ timing: "average", dryRun: false });
-        const expected = (0.50 + 0.54 + 0.60) / 3;
-        assertPinned(s.position, expected, "Position (average)");
-    });
-
-    await t("Playhead-Modus rechnet Sequenzzeit in Clipzeit um", async () => {
-        const s = buildScenario(); // start=10s, inPoint=1s, playhead=11s -> 2s
-        await runSmoothAutoFrame({ timing: "playhead", dryRun: false });
-        assertPinned(s.position, 0.54, "Position (playhead)");
-    });
-
-    await t("Rotation == 0 wird geschrieben (N1-Regression)", async () => {
-        const s = buildScenario();
-        const r = await runSmoothAutoFrame({ timing: "start", fixRotation: true, dryRun: false });
-        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-        assert.strictEqual(s.rotation._static, 0, "Rotation nicht 0");
-        const names = r.results[0].changes.map((c) => c.param);
-        assert.ok(names.includes("Drehung"), "Rotation nicht verarbeitet: " + names);
-    });
-
-    await t("Scale wird nur auf Wunsch angefasst", async () => {
-        const s = buildScenario();
-        await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(s.scale._keys.length, 2, "Scale wurde ungefragt verändert");
-
-        reset();
-        const s2 = buildScenario();
-        await runSmoothAutoFrame({ timing: "start", fixScale: true, dryRun: false });
-        assert.ok(s2.scale._keys.length <= 1, "Scale animiert noch");
-        const scaleValue = s2.scale._keys.length === 1
-            ? s2.scale._keys[0].v
-            : s2.scale._static;
-        assert.strictEqual(scaleValue, 1.0, "Scale-Wert falsch: " + scaleValue);
-    });
-
-    await t("Standardmodus schreibt GENAU EINEN Keyframe am Referenzzeitpunkt", async () => {
-        /*
-         * Der Algorithmus aus dem Tutorial: alle Keyframes loeschen, dann
-         * genau einen mit dem gewaehlten Wert setzen. Der Autor weist darauf
-         * hin, dass Premiere mindestens einen Keyframe auf der Property
-         * erwartet - zwei zu schreiben (frueherer Stand) weicht davon ab.
-         */
-        const s = buildScenario();
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-
-        const rr = log.find((l) => l.kind === "removeRange" && l.param === "Position");
-        assert.ok(rr, "Keyframes wurden nicht geloescht");
-        assert.strictEqual(rr.from, S(1), "Loeschbereich Start");
-        assert.strictEqual(rr.to, S(3), "Loeschbereich Ende");
-
-        const adds = log.filter((l) => l.kind === "addKeyframe" && l.param === "Position");
-        assert.strictEqual(adds.length, 1, "erwartet GENAU 1 Keyframe, waren " + adds.length);
-        assert.strictEqual(adds[0].position, S(1), "Keyframe nicht am Referenzzeitpunkt");
-        assert.strictEqual(s.position._keys.length, 1, "Endzustand: nicht 1 Keyframe");
-        assertPinned(s.position, 0.50, "Position");
-    });
-
-    await t("Option 'konstanter Wert' schreibt gar keinen Keyframe", async () => {
-        const s = buildScenario();
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false, staticValue: true });
-        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-        assert.strictEqual(s.position._keys.length, 0, "es wurden Keyframes geschrieben");
-        assert.strictEqual(s.position._tv, false, "noch animiert");
-        assertPinned(s.position, 0.50, "Position");
-    });
-
-    await t("Unbekannte Timing-Option fällt auf 'start' zurück (Whitelist)", async () => {
-        buildScenario();
-        const r = await runSmoothAutoFrame({ timing: "evil(); //", dryRun: true });
-        assert.strictEqual(r.timing, "start", "timing=" + r.timing);
-    });
-
-    await t("Clip ohne Auto Reframe wird übersprungen, nicht verändert", async () => {
-        const other = new MockComponent("AE.ADBE Opacity", "Deckkraft", []);
-        const clip = new MockTrackItem("plain.mov", new MockChain([other]), S(0), S(2), S(0));
-        currentProject = makeProject({
-            async getSelection() { return { async getTrackItems() { return [clip]; } }; },
-            async getPlayerPosition() { return new TickTime(0); }
-        });
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.skipped, 1, "skipped=" + r.skipped);
-        assert.strictEqual(r.errors, 0);
-        assert.strictEqual(log.length, 0, "es wurde geschrieben");
-    });
-
-    await t("Echter matchName AE.ADBE AEFilterAutoFramer wird erkannt", async () => {
-        // Aus echtem Premiere 26.3.2 (de_DE) beobachtet.
-        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
-        const position = new MockParam("Position anpassen", [{ t: S(1), v: new PointF(0.72, 0.5) }], null, true);
-        makeScenario([override, position], {
-            matchName: "AE.ADBE AEFilterAutoFramer",
-            displayName: "Auto Reframe",
-            clipName: "real.mov"
-        });
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-        assert.strictEqual(r.processed, 1);
-    });
-
-    await t("ALLE animierten Positions-Parameter werden eingefroren", async () => {
-        /*
-         * Belegt in Premiere 26.3.2: nur "Position anpassen" einzufrieren
-         * stoppt die Bewegung NICHT - "Position" und "Generated Keyframes"
-         * animieren weiter. Daher werden alle drei behandelt.
-         */
-        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
-        const applied = new MockParam("Position", [
-            { t: S(1), v: new PointF(0.68, 0.5) },
-            { t: S(2), v: new PointF(0.75, 0.5) }
-        ], null, true);
-        const adjust = new MockParam("Position anpassen", [
-            { t: S(1), v: new PointF(0.72, 0.5) }
-        ], null, true);
-        const generated = new MockParam("Generated Keyframes", [
-            { t: S(1), v: new PointF(0.5, 0.5) },
-            { t: S(2), v: new PointF(0.6, 0.5) }
-        ], null, true);
-        makeScenario([override, applied, adjust, generated], { clipName: "allpos.mov" });
-
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-
-        const names = r.results[0].changes.map((c) => c.param);
-        assert.ok(names.includes("Position"), "Position fehlt: " + names);
-        assert.ok(names.includes("Position anpassen"), "Position anpassen fehlt: " + names);
-        assert.ok(names.includes("Generated Keyframes"), "Generated Keyframes fehlt: " + names);
-
-        // Jeder haelt seinen EIGENEN Wert zum Referenzzeitpunkt.
-        assertPinned(applied, 0.68, "Position");
-        assertPinned(adjust, 0.72, "Position anpassen");
-        assertPinned(generated, 0.5, "Generated Keyframes");
-    });
-
-    await t("Parameter-Dump enthält Werte und Werttypen", async () => {
-        buildScenario();
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: true });
-        const dump = r.results[0].params;
-        assert.ok(dump && dump.length, "kein Dump");
-        const override = dump.find((p) => p.name.indexOf("überschreiben") !== -1);
-        assert.ok(override, "Override nicht im Dump");
-        assert.strictEqual(override.valueType, "boolean", "Werttyp fehlt/falsch");
-        assert.strictEqual(override.value, false, "Wert fehlt");
-    });
-
-    await t("Auto Reframe wird neben anderen Effekten gefunden", async () => {
-        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
-        const position = new MockParam("Position", [{ t: S(1), v: new PointF(0.2, 0.3) }], null, true);
-        makeScenario([override, position], {
-            extraComponents: [new MockComponent("AE.ADBE Opacity", "Deckkraft", [])]
-        });
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-        assert.strictEqual(r.processed, 1);
-    });
-
-    await t("Keine Auswahl -> fatalError, keine Mutation", async () => {
-        currentProject = makeProject({
-            async getSelection() { return { async getTrackItems() { return []; } }; },
-            async getPlayerPosition() { return new TickTime(0); }
-        });
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.ok(r.fatalError, "kein fatalError");
-        assert.strictEqual(log.length, 0);
-    });
-
-    await t("Chain wird vor dem Schreiben erneut geholt (N3)", async () => {
-        const s = buildScenario();
-        await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.ok(s.clip.chainFetchCount >= 2,
-            "Chain nur " + s.clip.chainFetchCount + "x geholt");
-    });
-
-    // --- Werteformen, die Premiere real zurückgeben kann -------------------
-    const shapeCases = [
-        ["PointF-artig {x,y}",    () => new PointF(0.42, 0.5),              0.42],
-        ["Wrapper {value:{x,y}}", () => ({ value: new PointF(0.42, 0.5) }), 0.42],
-        ["doppelt verpackt",      () => ({ value: { value: new PointF(0.42, 0.5) } }), 0.42],
-        ["Array [x,y]",           () => [0.42, 0.5],                        0.42],
-        ["Wrapper um Array",      () => ({ value: [0.42, 0.5] }),            0.42],
-        ["numerische Strings",    () => ({ x: "0.42", y: "0.5" }),           0.42]
-    ];
-
-    for (const [label, make, expectedX] of shapeCases) {
-        await t("Position als " + label + " wird gelesen und geschrieben", async () => {
-            const s = buildShapeScenario(make());
-            const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-            assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-            assertPinned(s.position, expectedX, "Position (" + label + ")");
-        });
+    const r = await execute();
+    succeeded(r);
+    assert.equal(r.undoSteps, 4);
+    assert.equal(clip.adjust.keys.length, 1);
+});
+
+test("unreadable keyframe state is an error, not an empty path or success", async () => {
+    const { clip } = setup();
+    clip.adjust.getKeyframeListAsTickTimes = () => { throw new Error("invalid script object"); };
+    const r = await execute();
+    failed(r, "reference-time");
+    assert.equal(M.state.log.length, 0);
+});
+
+test("undoing the reported steps restores override and the original parameters", async () => {
+    const { clip, project } = setup();
+    const original = M.clone(clip.effect.params.map((p) => ({ value: p.value, keys: p.keys, varying: p.varying })));
+    const r = await execute(); succeeded(r);
+    for (let i = 0; i < r.undoSteps; i++) project.undo();
+    assert.deepEqual(M.clone(clip.effect.params.map((p) => ({ value: p.value, keys: p.keys, varying: p.varying }))), original);
+});
+
+test("batch results count success, failed readiness, and audio separately", async () => {
+    const good = M.makeClip({ name: "good" });
+    const bad = M.makeClip({ name: "bad", transfer: false });
+    const audio = M.makeClip({ noEffect: true });
+    M.install([bad, audio, good]);
+    const r = await execute();
+    assert.equal(r.processed, 1); assert.equal(r.errors, 1); assert.equal(r.skipped, 1);
+    assert.equal(r.undoSteps, 6);
+    assert.equal(good.adjust.keys.length, 1);
+});
+
+test("end uses the last VISIBLE frame, not an out-of-range original keyframe", async () => {
+    const { clip } = setup();
+    const expected = clip.generated.at(11.96);
+    const r = await execute({ timing: "end" }); succeeded(r);
+    assert.equal(clip.adjust.keys[0].time, 11.96);
+    assert.deepEqual(M.normalize(clip.adjust.keys[0].value), expected);
+});
+
+test("start is the trimmed source in-point", async () => {
+    const { clip } = setup();
+    succeeded(await execute({ timing: "start" }));
+    assert.equal(clip.adjust.keys[0].time, 10);
+    assert.deepEqual(M.normalize(clip.adjust.keys[0].value), { x: 0.4, y: 0.5 });
+});
+
+test("out-of-clip playhead and retimed clips fail before override", async () => {
+    setup({}, { playhead: 102 });
+    failed(await execute(), "reference-time");
+    assert.equal(M.state.log.length, 0);
+    setup({ speed: 2 });
+    failed(await execute(), "reference-time");
+    assert.equal(M.state.log.length, 0);
+});
+
+test("wrapped point and boolean host values work end to end", async () => {
+    setup({ shape: (value) => ({ value: { value: value } }) });
+    succeeded(await execute());
+});
+
+test("no project/sequence/selection retains report metadata and writes nothing", async () => {
+    M.install([]);
+    let r = await execute(); assert.ok(r.fatalError); assert.ok(r.meta);
+    M.state.project = null;
+    r = await execute(); assert.ok(r.fatalError); assert.ok(r.meta);
+    M.state.project = { getActiveSequence: async () => null };
+    r = await execute(); assert.ok(r.fatalError); assert.ok(r.meta);
+    assert.equal(M.state.log.length, 0);
+});
+
+test("legacy options are rejected instead of silently running a different operation", async () => {
+    setup();
+    for (const options of [{ fixScale: true }, { fixRotation: true }, { staticValue: true }, { timing: "average" }]) {
+        const r = await execute(options);
+        assert.match(r.fatalError, /Veraltete Optionen/);
     }
+    assert.equal(M.state.log.length, 0);
+});
 
-    await t("Unlesbarer Wert: Meldung nennt Struktur UND JSON statt [object Object]", async () => {
-        const s = buildShapeScenario({ foo: "bar", nested: {} });
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        assert.strictEqual(r.errors, 1, "erwartete genau einen Fehler");
-        const reason = r.results[0].reason;
-        assert.ok(!reason.includes("[object Object]"), "noch [object Object]: " + reason);
-        assert.ok(reason.includes("keys=") || reason.includes("typ="), "keine Struktur: " + reason);
-        assert.ok(reason.includes("JSON:"), "kein JSON: " + reason);
-        assert.ok(reason.includes('"foo"'), "JSON ohne Daten: " + reason);
-        assert.strictEqual(s.position._keys.length, 1, "trotz Fehler geschrieben");
-    });
-
-    await t("JSON-Diagnose erfasst auch Prototyp-Getter (Host-Objekte)", async () => {
-        class HostLike {
-            get unitType() { return "percent"; }
-            get payload() { return "verborgen"; }
-        }
-        const hostish = new HostLike();
-        assert.strictEqual(JSON.stringify(hostish), "{}", "Vorbedingung: stringify liefert {}");
-
-        buildShapeScenario(hostish);
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
-        const reason = r.results[0].reason;
-        assert.ok(reason.includes("unitType") || reason.includes("payload"),
-            "Prototyp-Getter fehlen: " + reason);
-    });
-
-    await t("Report enthält Meta-Block für den Log-Export", async () => {
-        buildScenario();
-        const r = await runSmoothAutoFrame({ timing: "middle", fixScale: true, dryRun: true });
-        assert.ok(r.meta, "kein meta-Block");
-        assert.ok(r.meta.timestamp, "kein timestamp");
-        assert.strictEqual(r.meta.options.timing, "middle");
-        assert.strictEqual(r.meta.options.fixScale, true);
-        assert.ok(r.meta.pluginVersion, "keine pluginVersion");
-        const text = JSON.stringify(r, null, 2);
-        assert.ok(text.length > 50 && text.includes('"meta"'), "nicht exportierbar");
-    });
-
-    console.log(failures === 0
-        ? "\n  ALLE TESTS BESTANDEN\n"
-        : "\n  " + failures + " TEST(S) FEHLGESCHLAGEN\n");
-    process.exit(failures === 0 ? 0 : 1);
-})();
+test("reports are JSON-serializable and identify the build and completed stages", async () => {
+    setup(); const r = await execute(); succeeded(r);
+    const serialized = JSON.parse(JSON.stringify(r));
+    assert.equal(serialized.meta.pluginVersion, "1.1.0");
+    assert.equal(serialized.meta.diagnosticsVersion, 10);
+    assert.equal(serialized.results[0].parameters.adjust, 6);
+    assert.equal(serialized.results[0].steps[1].step, "editable-path");
+});

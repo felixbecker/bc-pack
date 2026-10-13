@@ -1,11 +1,11 @@
 {
     "name": "smooth-auto-frame-uxp",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Premiere Pro UXP plugin that removes unwanted Auto Reframe camera drift from selected clips.",
     "private": true,
     "scripts": {
         "lint": "eslint .",
-        "test": "node test/core.test.js",
+        "test": "node --test test/*.test.js",
         "check": "npm run lint && npm run test"
     },
     "devDependencies": {

@@ -18,32 +18,22 @@
             <sp-label for="timingOption" size="S">Zu haltender Referenz-Frame</sp-label>
             <sp-picker id="timingOption" size="S">
                 <sp-menu slot="options">
-                    <sp-menu-item value="start" selected>Anfang des Clips</sp-menu-item>
+                    <sp-menu-item value="playhead" selected>Aktuelle Abspielposition</sp-menu-item>
+                    <sp-menu-item value="start">Anfang des Clips</sp-menu-item>
                     <sp-menu-item value="middle">Mitte des Clips</sp-menu-item>
-                    <sp-menu-item value="end">Ende des Clips</sp-menu-item>
-                    <sp-menu-item value="playhead">Aktuelle Abspielposition</sp-menu-item>
-                    <sp-menu-item value="average">Mittelwert aller Keyframes</sp-menu-item>
+                    <sp-menu-item value="end">Letzter sichtbarer Frame</sp-menu-item>
                 </sp-menu>
             </sp-picker>
         </div>
 
         <div class="field">
-            <sp-label size="S">Zusätzlich einfrieren</sp-label>
-            <sp-checkbox id="fixScale" size="S">Scale (Zoom)</sp-checkbox>
-            <sp-checkbox id="fixRotation" size="S">Rotation</sp-checkbox>
-        </div>
-
-        <div class="field">
             <sp-label size="S">Ausführung</sp-label>
-            <sp-checkbox id="dryRun" size="S" checked>Dry-Run (nur Vorschau)</sp-checkbox>
-            <sp-checkbox id="staticValue" size="S">
-                Konstanter Wert ohne Keyframes
-            </sp-checkbox>
+            <sp-checkbox id="dryRun" size="S" checked>Dry-Run (nur Vorprüfung)</sp-checkbox>
             <sp-body size="XS" class="hint">
-                Standard: alle Keyframes löschen und genau einen am gewählten
-                Referenz-Frame setzen — der Ablauf aus dem Tutorial. Die Option
-                schaltet Keyframing stattdessen ganz ab; Premiere überträgt den
-                erzeugten Pfad dann teils erneut.
+                Auto Reframe bleibt erhalten. „Position anpassen“ wird auf den
+                Referenzwert gesetzt: Stoppuhr aus, Wert setzen, Stoppuhr an,
+                genau ein Keyframe. Der echte Lauf erzeugt mehrere Undo-Schritte.
+                Im Dry-Run wird die Override-Checkbox nicht aktiviert.
             </sp-body>
         </div>
 

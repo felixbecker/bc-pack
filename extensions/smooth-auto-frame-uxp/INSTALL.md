@@ -157,35 +157,39 @@ wählen (z. B. 9:16) → erstellen. Premiere analysiert im Hintergrund — abwar
 
 ### 14. Ausgangszustand ansehen
 
-Clip anklicken → **Effektoptionen** → *Auto-Neuformatierung* aufklappen. Du
-solltest viele Positions-Keyframes sehen. Das ist der Drift, der entfernt werden
-soll.
+Clip anklicken → **Effektoptionen** → *Auto Reframe* aufklappen. Beim Abspielen
+den störenden Drift ansehen. Die Keyframes unter „Position anpassen“ werden
+gegebenenfalls erst nach Aktivieren von „Erzeugten Pfad überschreiben“ sichtbar.
 
 ### 15. Clips auswählen
 
-In der Timeline die zu bereinigenden Clips markieren — mehrere gleichzeitig.
+Für den ersten Test genau einen Clip markieren und den Playhead auf den
+gewünschten Ausschnitt stellen. Später sind mehrere Clips gleichzeitig möglich.
 
 ### 16. Dry-Run
 
-Referenz-Frame wählen (zunächst *Anfang des Clips*), **Dry-Run angehakt lassen**,
+Referenz-Frame wählen (zunächst *Aktuelle Abspielposition*), **Dry-Run angehakt lassen**,
 **Ausführen**.
 
-Schreibt garantiert nichts. Das Log zeigt pro Clip die gefundenen Parameter, den
-Zielwert und die Anzahl vorhandener Keyframes.
+Schreibt nichts. Das Log zeigt Parameter und Zeitbereich. Ist Override noch aus,
+kann der Dry-Run die Pfadfreigabe und den späteren Zielwert noch nicht bestätigen.
 
 ### 17. Echter Lauf
 
-Dry-Run abwählen → **Ausführen**. Danach in den Effektoptionen prüfen: Keyframes
-weg, „Override Generated Pan" aktiv, Wert konstant.
+Dry-Run abwählen → **Ausführen**. Danach prüfen: Auto Reframe bleibt erhalten,
+Override aktiv, unter „Position anpassen“ genau **ein** Keyframe mit dem
+gewählten Wert. Build-Anzeige: **1.1.0 · Diagnose d10**.
 
 ### 18. Ergebnis beurteilen
 
-Abspielen — der Hintergrund sollte stehen.
+Referenzframe mit dem vorherigen Ausschnitt vergleichen. Anschließend den ganzen
+Clip abspielen — der Hintergrund sollte stehen. Details: [Echt-Test](docs/premiere-test.md).
 
 ### 19. Undo-Test
 
-Einmal **Cmd/Ctrl+Z**. Der gesamte Lauf über alle Clips muss in **einem** Schritt
-zurückgehen. Damit ist die Transaktion verifiziert.
+Unmittelbar nach dem Lauf so oft **Cmd/Ctrl+Z** ausführen, wie der Report
+abgeschlossene Schreibschritte zählt (bis zu fünf pro Clip). Danach muss der
+Ausgangszustand wiederhergestellt sein. Das gilt auch nach einem Teilfehler.
 
 ---
 
@@ -214,13 +218,15 @@ bestätigt oder ausgeschlossen ist für Premiere 26 aber nicht, ob der Schalter
 auch für `.ccx`-Installationen verlangt wird. Im Zweifel: aktiviert lassen.
 
 **Log zeigt „Kein Auto-Reframe-Effekt gefunden"**
-Die Namenserkennung trifft deine Sprachversion nicht. Den exakten Effektnamen aus
-den Effektoptionen ablesen und in `src/core.js` bei
-`AUTO_REFRAME_DISPLAY_NAMES` bzw. den `*_PARAM_NAMES` ergänzen.
+Die Effektkette und die UI-Sprache im Log prüfen. Bei einem nicht erkannten
+Parameter nennt der Report die vorhandenen Parameter. Ein unbekannter Name darf
+nicht durch einen anderen Positionsparameter ersetzt werden.
 
 **Bewegung bleibt nach dem echten Lauf drin**
-Checkbox **„Keyframe-Modus (Fallback)"** aktivieren und erneut ausführen. Dann
-werden statt eines konstanten Werts zwei Hold-Keyframes geschrieben.
+Den fehlgeschlagenen Schritt im Log prüfen. Ist der bearbeitbare Pfad leer,
+Override testweise manuell in Premiere aktivieren und die Keyframes unter
+„Position anpassen“ prüfen. Danach erneut ausführen. Es gibt keinen
+Mehrfach-Schreibmodus. Siehe [Echt-Test](docs/premiere-test.md).
 
 **Creative Cloud Desktop startet beim Doppelklick nicht**
 Die Dateizuordnung für `.ccx` fehlt oder es liegt ein Rechteproblem vor — dann
@@ -244,7 +250,7 @@ Das ist der Entwicklungsweg — für den Produktiveinsatz auf einem Client die
 
 ```bash
 npm install
-npm run check     # Lint + 14 Tests
+npm run check     # Adobe-Lint-Regeln + Regressionstests
 ```
 
 Nur nötig, wenn du am Code arbeitest. Für den Betrieb des Plugins irrelevant —
