@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="style.css" />
+    <script src="main.js"></script>
+</head>
+<body>
+    <div class="wrapper">
+        <sp-heading size="S">Reframe Lock</sp-heading>
+        <sp-body size="XS" class="subtitle">
+            Friert den von Auto Reframe gewählten Bildausschnitt ein: der Ausschnitt
+            bleibt, die Restbewegung verschwindet. Quell- und Sequenzformat werden
+            gemessen — beliebige Formatkombinationen, typisch 16:9 → 1:1 oder 9:16.
+        </sp-body>
+        <sp-divider size="S"></sp-divider>
+
+        <div class="field">
+            <sp-label for="scope" size="S">Bearbeiten</sp-label>
+            <sp-picker id="scope" size="S">
+                <sp-menu slot="options">
+                    <sp-menu-item value="selection" selected>Ausgewählte Clips</sp-menu-item>
+                    <sp-menu-item value="track">Ganze Spur der Auswahl</sp-menu-item>
+                    <sp-menu-item value="allTracks">Alle Videospuren</sp-menu-item>
+                </sp-menu>
+            </sp-picker>
+            <sp-body size="XS" class="hint">
+                Für „ganze Spur" genügt ein ausgewählter Clip auf der gewünschten Spur.
+            </sp-body>
+        </div>
+
+        <div class="field">
+            <sp-label for="reference" size="S">Welcher Bildausschnitt bleibt</sp-label>
+            <sp-picker id="reference" size="S">
+                <sp-menu slot="options">
+                    <sp-menu-item value="median" selected>Median (empfohlen)</sp-menu-item>
+                    <sp-menu-item value="start">Anfang des Clips</sp-menu-item>
+                    <sp-menu-item value="middle">Zeitliche Mitte</sp-menu-item>
+                    <sp-menu-item value="end">Ende des Clips</sp-menu-item>
+                    <sp-menu-item value="playhead">Abspielposition</sp-menu-item>
+                    <sp-menu-item value="mean">Mittelwert</sp-menu-item>
+                </sp-menu>
+            </sp-picker>
+            <sp-body size="XS" class="hint">
+                Der Median ist der robuste Mittelpunkt des Zitterns und immer ein
+                Ausschnitt, den Auto Reframe selbst gewählt hat.
+            </sp-body>
+        </div>
+
+        <div class="field">
+            <sp-label size="S">Ausführung</sp-label>
+            <sp-checkbox id="dryRun" size="S" checked>
+                Dry-Run — nur messen und anzeigen
+            </sp-checkbox>
+            <sp-checkbox id="removeEffect" size="S" checked>
+                Auto Reframe danach entfernen
+            </sp-checkbox>
+            <sp-checkbox id="freezeScale" size="S" checked>
+                Skalierung mit einfrieren
+            </sp-checkbox>
+            <sp-checkbox id="freezeRotation" size="S">Drehung mit einfrieren</sp-checkbox>
+            <sp-checkbox id="debugLog" size="S">
+                Ausführliches Log (Parameter + Messkurve)
+            </sp-checkbox>
+            <sp-checkbox id="force" size="S">
+                Vorhandene Motion-Werte überschreiben
+            </sp-checkbox>
+            <sp-checkbox id="allowWeakCalibration" size="S">
+                Unsichere Kalibrierung zulassen
+            </sp-checkbox>
+            <sp-body size="XS" class="hint">
+                Quell- und Sequenzformat werden gemessen (Sequenzeinstellungen bzw.
+                Medien-Metadaten) — es ist kein Format fest eingebaut. Lässt sich das
+                Quellformat nicht lesen, sinkt das Vertrauen der Kalibrierung und es
+                wird standardmäßig nichts geschrieben.
+            </sp-body>
+        </div>
+
+        <sp-divider size="S"></sp-divider>
+
+        <div class="actions">
+            <sp-button id="runButton" variant="accent" size="S">Ausführen</sp-button>
+            <sp-button id="clearButton" variant="secondary" treatment="outline" size="S">
+                Log leeren
+            </sp-button>
+        </div>
+
+        <div class="actions">
+            <sp-button id="copyButton" variant="secondary" treatment="outline" size="S" disabled>
+                Log kopieren
+            </sp-button>
+            <sp-button id="saveButton" variant="secondary" treatment="outline" size="S" disabled>
+                Log speichern…
+            </sp-button>
+        </div>
+
+        <sp-body size="XS" id="statusBar" class="status"></sp-body>
+
+        <div id="summary" class="summary"></div>
+        <div id="notes" class="notes"></div>
+        <div id="log" class="log"></div>
+
+        <sp-body size="XS" id="buildInfo" class="build-info"></sp-body>
+    </div>
+</body>
+</html>

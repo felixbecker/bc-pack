@@ -1,0 +1,53 @@
+{
+    "manifestVersion": 5,
+    "id": "com.reframelock.uxp",
+    "name": "Reframe Lock",
+    "version": "0.1.0",
+    "main": "index.html",
+    "host": {
+        "app": "premierepro",
+        "minVersion": "25.6.0"
+    },
+    "entrypoints": [
+        {
+            "type": "panel",
+            "id": "reframeLockPanel",
+            "label": {
+                "default": "Reframe Lock"
+            },
+            "description": {
+                "default": "Freezes the Auto Reframe crop decision into a static Motion transform."
+            },
+            "minimumSize": {
+                "width": 340,
+                "height": 460
+            },
+            "preferredDockedSize": {
+                "width": 400,
+                "height": 640
+            },
+            "preferredFloatingSize": {
+                "width": 440,
+                "height": 720
+            }
+        }
+    ],
+    "icons": [
+        {
+            "width": 24,
+            "height": 24,
+            "path": "icons/icon.png",
+            "scale": [
+                1,
+                2
+            ],
+            "species": [
+                "pluginList"
+            ]
+        }
+    ],
+    "requiredPermissions": {
+        "clipboard": "readAndWrite",
+        "localFileSystem": "request"
+    }
+}

@@ -1,0 +1,164 @@
+body {
+    margin: 0;
+    font-size: 11px;
+}
+
+.wrapper {
+    padding: 10px 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.subtitle,
+.hint {
+    opacity: 0.72;
+    line-height: 1.4;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.field sp-picker {
+    width: 100%;
+}
+
+.actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.status {
+    min-height: 14px;
+    opacity: 0.85;
+}
+
+.summary {
+    display: none;
+    gap: 5px;
+    flex-wrap: wrap;
+}
+
+.summary.visible {
+    display: flex;
+}
+
+.pill {
+    padding: 2px 7px;
+    border-radius: 9px;
+    font-size: 10px;
+    border: 1px solid currentColor;
+    opacity: 0.9;
+}
+
+.pill.ok {
+    color: #4caf7d;
+}
+
+.pill.skipped {
+    color: #9a9a9a;
+}
+
+.pill.error {
+    color: #e0695f;
+}
+
+.notes {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.note {
+    opacity: 0.7;
+    line-height: 1.4;
+}
+
+.log {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 340px;
+    overflow-y: auto;
+}
+
+.log-entry {
+    border-left: 2px solid #6b6b6b;
+    padding: 4px 0 4px 8px;
+}
+
+.log-entry.status-ok {
+    border-left-color: #4caf7d;
+}
+
+.log-entry.status-dryRun,
+.log-entry.status-planned {
+    border-left-color: #6fa8dc;
+}
+
+.log-entry.status-skipped {
+    border-left-color: #8a8a8a;
+}
+
+.log-entry.status-error {
+    border-left-color: #e0695f;
+}
+
+.clip-name {
+    font-weight: 600;
+}
+
+.status-tag {
+    opacity: 0.6;
+    font-weight: 400;
+}
+
+.reason,
+.metric,
+.changes,
+.verified,
+.problem,
+.warning {
+    line-height: 1.45;
+    opacity: 0.9;
+}
+
+.metric {
+    opacity: 0.75;
+}
+
+.changes {
+    color: #6fa8dc;
+}
+
+.verified {
+    color: #4caf7d;
+    opacity: 0.85;
+}
+
+.problem {
+    color: #e0695f;
+}
+
+.warning {
+    color: #e6b35c;
+}
+
+.fatal-error {
+    color: #e0695f;
+    line-height: 1.45;
+}
+
+.empty-state {
+    opacity: 0.55;
+    line-height: 1.45;
+}
+
+.build-info {
+    opacity: 0.45;
+    font-size: 10px;
+}
