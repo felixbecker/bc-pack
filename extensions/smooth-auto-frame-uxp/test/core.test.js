@@ -514,10 +514,12 @@ function reset() { log.length = 0; }
         assert.strictEqual(p[0]._static, false, "falsche Checkbox (Index 0) gesetzt");
         assert.strictEqual(p[4]._static, true, "Uniform Scale veraendert");
         // Bearbeitet werden muss "Position anpassen" (Index 6), nicht Index 2.
-        assert.strictEqual(r.results[0].changes[0].param, "Position anpassen",
-            "falscher Parameter: " + r.results[0].changes[0].param);
+        const changedNames = r.results[0].changes.map((c) => c.param);
+        assert.ok(changedNames.includes("Position anpassen"),
+            "Position anpassen fehlt: " + changedNames);
         assert.strictEqual(p[6]._keys.length, 0, "Index 6 nicht bereinigt");
-        assert.strictEqual(p[2]._keys.length, 1, "Index 2 wurde fälschlich angefasst");
+        // Neuer Vertrag: die angewandte Position wird ebenfalls eingefroren.
+        assert.strictEqual(p[2]._keys.length, 0, "Index 2 nicht bereinigt");
         assert.strictEqual(r.results[0].overrideResolvedBy, "index",
             "Auflösungsart nicht protokolliert");
         assert.ok(r.results[0].paramsAfter, "paramsAfter fehlt");
@@ -579,7 +581,7 @@ function reset() { log.length = 0; }
         assert.ok(r.results[0].keyframeWaitAttempts >= 1, "keine Wartezyklen protokolliert");
     });
 
-    await t("Ohne Keyframe-Übertragung wird der erzeugte Pfad als Quelle genutzt", async () => {
+    await t("Nur der erzeugte Pfad traegt Keyframes -> nur dieser wird eingefroren", async () => {
         /*
          * Realfall Premiere 26.3.2: beim programmatischen Setzen der Checkbox
          * überträgt Premiere den erzeugten Pfad NICHT auf "Position anpassen".
@@ -601,15 +603,23 @@ function reset() { log.length = 0; }
         assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
         assert.strictEqual(r.processed, 1);
 
+        /*
+         * "Position anpassen" und "Position" tragen hier keine Keyframes, also
+         * gibt es dort nichts einzufrieren - sie werden uebersprungen. Nur der
+         * erzeugte Pfad traegt die Bewegung und wird behandelt.
+         */
+        const names = r.results[0].changes.map((c) => c.param);
+        assert.deepStrictEqual(names, ["Generated Keyframes"],
+            "erwartet nur den erzeugten Pfad: " + names);
         const change = r.results[0].changes[0];
-        assert.strictEqual(change.param, "Position anpassen", "falsches Ziel: " + change.param);
-        assert.strictEqual(change.readFrom, "generatedPath", "Quelle nicht protokolliert: " + change.readFrom);
-        assert.strictEqual(change.readParam, "Generated Keyframes");
-        assert.strictEqual(change.keyframesBefore, 2, "Keyframe-Zahl der Quelle fehlt");
-        // Der echte erste Keyframe-Wert, nicht der neutrale 0.5.
-        assert.ok(Math.abs(adjust._static.x - 0.6889) < 1e-9,
-            "neutraler Wert geschrieben: " + adjust._static.x);
-        assert.strictEqual(generated._keys.length, 2, "Quelle wurde verändert");
+        assert.strictEqual(change.readFrom, "target", "Quelle: " + change.readFrom);
+        assert.strictEqual(change.keyframesBefore, 2);
+        assert.strictEqual(generated._keys.length, 0, "Generated Keyframes nicht bereinigt");
+        assert.ok(Math.abs(generated._static.x - 0.6889) < 1e-9,
+            "falscher Wert eingefroren: " + generated._static.x);
+        // Unbeteiligte Parameter bleiben unberuehrt.
+        assert.ok(Math.abs(adjust._static.x - 0.5) < 1e-9,
+            "Position anpassen wurde ungefragt veraendert: " + adjust._static.x);
     });
 
     await t("Referenz 'end' nimmt den LETZTEN Keyframe-Wert", async () => {
@@ -697,21 +707,41 @@ function reset() { log.length = 0; }
         assert.strictEqual(r.processed, 1);
     });
 
-    await t("'Position anpassen' hat Vorrang vor blossem 'Position'", async () => {
-        // Echter Effekt hat BEIDE. Das Tutorial bearbeitet "Adjust Position".
+    await t("ALLE animierten Positions-Parameter werden eingefroren", async () => {
+        /*
+         * Belegt in Premiere 26.3.2: nur "Position anpassen" einzufrieren
+         * stoppt die Bewegung NICHT - "Position" und "Generated Keyframes"
+         * animieren weiter. Daher werden alle drei behandelt.
+         */
         const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
-        const merged = new MockParam("Position", [{ t: S(1), v: new PointF(0.11, 0.11) }], null, true);
-        const adjust = new MockParam("Position anpassen", [{ t: S(1), v: new PointF(0.72, 0.5) }], null, true);
-        linkAppliedPosition(merged, adjust);
-        const s = makeScenario([override, merged, adjust], { clipName: "prio.mov" });
+        const applied = new MockParam("Position", [
+            { t: S(1), v: new PointF(0.68, 0.5) },
+            { t: S(2), v: new PointF(0.75, 0.5) }
+        ], null, true);
+        const adjust = new MockParam("Position anpassen", [
+            { t: S(1), v: new PointF(0.72, 0.5) }
+        ], null, true);
+        const generated = new MockParam("Generated Keyframes", [
+            { t: S(1), v: new PointF(0.5, 0.5) },
+            { t: S(2), v: new PointF(0.6, 0.5) }
+        ], null, true);
+        makeScenario([override, applied, adjust, generated], { clipName: "allpos.mov" });
 
         const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
         assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-        assert.strictEqual(r.results[0].changes[0].param, "Position anpassen",
-            "falscher Parameter gewaehlt: " + r.results[0].changes[0].param);
-        assert.strictEqual(merged._keys.length, 1, "falscher Parameter wurde verändert");
-        assert.strictEqual(adjust._keys.length, 0, "Zielparameter nicht bereinigt");
-        void s;
+
+        const names = r.results[0].changes.map((c) => c.param);
+        assert.ok(names.includes("Position"), "Position fehlt: " + names);
+        assert.ok(names.includes("Position anpassen"), "Position anpassen fehlt: " + names);
+        assert.ok(names.includes("Generated Keyframes"), "Generated Keyframes fehlt: " + names);
+
+        assert.strictEqual(applied._keys.length, 0, "Position nicht bereinigt");
+        assert.strictEqual(adjust._keys.length, 0, "Position anpassen nicht bereinigt");
+        assert.strictEqual(generated._keys.length, 0, "Generated Keyframes nicht bereinigt");
+        // Jeder haelt seinen EIGENEN Wert zum Referenzzeitpunkt.
+        assert.strictEqual(applied._static.x, 0.68, "Position: " + applied._static.x);
+        assert.strictEqual(adjust._static.x, 0.72, "Adjust: " + adjust._static.x);
+        assert.strictEqual(generated._static.x, 0.5, "Generated: " + generated._static.x);
     });
 
     await t("Parameter-Dump enthält Werte und Werttypen", async () => {

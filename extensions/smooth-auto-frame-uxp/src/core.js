@@ -166,13 +166,24 @@ function delay(ms) {
 }
 
 /*
- * Parameters used for verification only (never written):
- *   "Position"            — the APPLIED position; if this still animates, the
- *                           movement is still there, whatever else we changed.
- *   "Generated Keyframes" — the raw analyzed path.
+ * The effect exposes three position-carrying parameters, and freezing only one
+ * of them does NOT stop the movement. Measured in Premiere 26.3.2 after
+ * pinning "Position anpassen" successfully (26 keyframes -> 0):
+ *
+ *   index 2 "Position"            26 keyframes, still animating
+ *   index 6 "Position anpassen"    0 keyframes  (frozen)
+ *   index 7 "Generated Keyframes" 26 keyframes, still animating
+ *
+ * The picture kept drifting, so "Position anpassen" is an additional offset
+ * rather than the effective path. Every animated position parameter is
+ * therefore frozen, each to its own value at the reference time.
+ *
+ * "Position" is the APPLIED parameter and doubles as the success criterion:
+ * if it still animates afterwards, the movement was not removed.
  */
 const APPLIED_POSITION_NAMES = ["position"];
 const GENERATED_PATH_NAMES = ["generated keyframes", "erzeugte keyframes"];
+const ADJUST_POSITION_NAMES = ["adjust position", "position anpassen"];
 
 /* "Position anpassen" / "Adjust Position" must outrank the bare "Position". */
 const POSITION_PARAM_NAMES = ["adjust position", "position anpassen", "position"];
@@ -194,7 +205,7 @@ const PLUGIN_VERSION = "1.0.0";
  * matched to the build that produced it — without this it was unclear whether
  * a report came from the current code or a stale installed copy.
  */
-const DIAGNOSTICS_VERSION = 6;
+const DIAGNOSTICS_VERSION = 7;
 
 /**
  * Collects host application info for diagnostics logs. Wrapped defensively
@@ -1091,8 +1102,25 @@ async function discoverClip(trackItem, options) {
             overrideActive = null;
         }
 
-        // Soft lookup: used only as a value source, never written.
         const generatedIndex = findParamIndex(component, GENERATED_PATH_NAMES, null);
+        const appliedIndex = findParamIndex(component, APPLIED_POSITION_NAMES, null);
+        const adjustIndex = findParamIndex(component, ADJUST_POSITION_NAMES, null);
+
+        /*
+         * All position-carrying parameters, in the order they are frozen.
+         * Duplicates and unresolved entries are dropped; the primary target
+         * (resolved above) is always included.
+         */
+        const positionIndexes = [];
+        const seenIndex = {};
+        const candidates = [appliedIndex, adjustIndex, generatedIndex, position.index];
+        for (let c = 0; c < candidates.length; c++) {
+            const idx = candidates[c];
+            if (idx >= 0 && !seenIndex[idx]) {
+                seenIndex[idx] = true;
+                positionIndexes.push(idx);
+            }
+        }
 
         return {
             status: "discovered",
@@ -1104,7 +1132,11 @@ async function discoverClip(trackItem, options) {
             overridePanIndex: override.index,
             overrideResolvedBy: override.resolvedBy,
             overrideActiveBefore: overrideActive,
-            paramIndexes: [position.index].concat(extras.map((e) => e.index)),
+            paramIndexes: positionIndexes.concat(extras.map((e) => e.index)),
+            // Separated because the skip rule differs: a position candidate
+            // without keyframes has nothing to freeze, whereas Scale/Rotation
+            // were requested explicitly and must be handled even when static.
+            positionIndexCount: positionIndexes.length,
             params: paramDump,
             components: found.components
         };
@@ -1131,18 +1163,50 @@ async function planClipValues(discovery, sequence, options) {
         throw new Error("Auto-Reframe-Komponente nicht mehr lesbar.");
     }
 
+    // How many position candidates actually carry keyframes — decides whether
+    // a keyframe-less candidate can be skipped.
+    let positionTargets = 0;
+    for (let i = 0; i < (discovery.positionIndexCount || 0); i++) {
+        const probe = component.getParam(discovery.paramIndexes[i]);
+        if (probe && getKeyframeTimes(probe).length > 0) positionTargets++;
+    }
+
     const targets = [];
     for (let i = 0; i < discovery.paramIndexes.length; i++) {
+        const index = discovery.paramIndexes[i];
+        const param = component.getParam(index);
+        if (!param) continue;
+
+        /*
+         * Position candidates without keyframes carry no movement, so freezing
+         * them would only overwrite a user setting for no gain — they are
+         * skipped as long as at least one other position candidate remains.
+         * Explicitly requested parameters (Scale/Rotation) are always handled,
+         * even when static: the user asked for them, and silently doing
+         * nothing while reporting success is the bug class this plugin exists
+         * to avoid.
+         */
+        const isPositionCandidate = i < (discovery.positionIndexCount || 1);
+        const hasKeyframes = getKeyframeTimes(param).length > 0;
+        if (isPositionCandidate && !hasKeyframes) {
+            // At least one position candidate carries the movement: the others
+            // are static and must stay untouched.
+            if (positionTargets >= 1) continue;
+            // None carries keyframes: keep only the primary candidate so the
+            // run still has a target, and skip the rest.
+            if (i > 0) continue;
+        }
+
         targets.push(
             await planParam(
                 component,
-                discovery.paramIndexes[i],
+                index,
                 discovery.trackItem,
                 sequence,
                 options.timing,
-                // Only the first target (position) has a generated-path
-                // counterpart to fall back to.
-                i === 0 ? discovery.generatedPathIndex : -1
+                // Fall back to the generated path only when this parameter
+                // itself carries no keyframes.
+                discovery.generatedPathIndex
             )
         );
     }
@@ -1811,7 +1875,10 @@ async function runSmoothAutoFrame(rawOptions) {
             const appliedIndex = component
                 ? findParamIndex(component, APPLIED_POSITION_NAMES, null)
                 : -1;
-            if (appliedIndex >= 0 && appliedIndex !== plan.paramIndexes[0]) {
+            const appliedIsTarget =
+                appliedIndex >= 0 &&
+                plan.targets.some((t) => t.paramIndex === appliedIndex);
+            if (appliedIndex >= 0 && !appliedIsTarget) {
                 const applied = component.getParam(appliedIndex);
                 if (applied) {
                     const appliedKeyframes = getKeyframeTimes(applied).length;
