@@ -4,6 +4,11 @@ Adobe Premiere Pro **UXP-Plugin**, das unerwünschte Kamerabewegung entfernt,
 die Premieres **Auto Reframe**-Effekt erzeugt — störend vor allem bei Clips,
 die eigentlich von einem Stativ gefilmt wurden.
 
+Grundlage ist der Ablauf aus diesem Tutorial:
+[Pr Pro: Auto Reframe Sequence without Tracking](https://www.youtube.com/watch?v=Fq0ogPX4ZMk)
+von Mathias Möhl — Transkript und Algorithmus in
+[docs/tutorial-transcript.md](docs/tutorial-transcript.md).
+
 **Erfordert Premiere Pro 25.6 oder neuer.** Ältere Versionen unterstützen UXP
 nicht und bräuchten eine CEP/ExtendScript-Umsetzung — die ist hier bewusst
 nicht enthalten, da Adobe CEP für Premiere abgekündigt hat und es aus
@@ -60,13 +65,19 @@ In-/Out-Point des Clips als Fallback verwendet.
 
 | Modus | Verhalten |
 |---|---|
-| **Standard** (empfohlen) | `createSetTimeVaryingAction(false)` + `createSetValueAction(...)` → konstanter Wert, keine Keyframes. |
-| **Keyframe-Modus** (Checkbox, Fallback) | Keyframes im Clipbereich entfernen, dann zwei identische Keyframes mit **Hold**-Interpolation an In-/Out-Point. |
+| **Standard** | Alle Keyframes löschen, dann **genau einen** am gewählten Referenz-Frame setzen. |
+| **Konstanter Wert** (Checkbox) | Keyframing ganz abschalten, kein Keyframe. |
 
-Der Keyframe-Modus existiert, weil in Tutorials berichtet wird, Premiere wolle
-auf dieser Property mindestens einen Keyframe sehen. Ob das bei aktivem
-„Override Generated Pan" tatsächlich zutrifft, ließ sich ohne laufende
-Premiere-Instanz nicht entscheiden — daher sind beide Wege verfügbar.
+Der Standard folgt dem Ablauf aus dem Tutorial (siehe
+[docs/tutorial-transcript.md](docs/tutorial-transcript.md)). Dessen Autor nennt
+den Grund ausdrücklich: Premiere erwartet auf dieser Property mindestens einen
+Keyframe. In Premiere 26.3.2 bestätigte sich das — ohne Keyframe überträgt
+Premiere den erzeugten Pfad erneut auf den Parameter und die Bewegung kehrt
+zurück. Ein einzelner Keyframe ist per Definition konstant; Hold-Interpolation
+oder ein zweiter Keyframe sind unnötig.
+
+Die Option „konstanter Wert" bleibt für den Fall verfügbar, dass sich das
+Verhalten in einer anderen Premiere-Version anders darstellt.
 
 ## Installation
 
@@ -228,8 +239,10 @@ smooth-auto-frame-uxp/
 ├── style.css
 ├── src/
 │   └── core.js          # Kernalgorithmus (Phase 1 async / Phase 2 Transaktion)
+├── docs/
+│   └── tutorial-transcript.md  # Quelle des Algorithmus (Video-Transkript)
 ├── test/
-│   └── core.test.js     # 14 Regressionstests gegen gemockte Premiere-API
+│   └── core.test.js     # 40 Regressionstests gegen gemockte Premiere-API
 ├── icons/
 ├── eslint.config.mjs    # inkl. @adobe/eslint-plugin-premierepro
 └── package.json
