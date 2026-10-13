@@ -205,7 +205,7 @@ const PLUGIN_VERSION = "1.0.0";
  * matched to the build that produced it — without this it was unclear whether
  * a report came from the current code or a stale installed copy.
  */
-const DIAGNOSTICS_VERSION = 7;
+const DIAGNOSTICS_VERSION = 8;
 
 /**
  * Collects host application info for diagnostics logs. Wrapped defensively
@@ -1157,7 +1157,7 @@ async function discoverClip(trackItem, options) {
  * Reads the reference values for a discovered clip and builds the write plan.
  * Must run AFTER the override checkbox has been enabled — see discoverClip.
  */
-async function planClipValues(discovery, sequence, options) {
+async function planClipValues(discovery, sequence, options, firstPass) {
     const component = discovery.chain.getComponentAtIndex(discovery.componentIndex);
     if (!component) {
         throw new Error("Auto-Reframe-Komponente nicht mehr lesbar.");
@@ -1187,14 +1187,17 @@ async function planClipValues(discovery, sequence, options) {
          * to avoid.
          */
         const isPositionCandidate = i < (discovery.positionIndexCount || 1);
+        // Scale/Rotation are handled once, in the first pass only.
+        if (!isPositionCandidate && !firstPass) continue;
         const hasKeyframes = getKeyframeTimes(param).length > 0;
         if (isPositionCandidate && !hasKeyframes) {
             // At least one position candidate carries the movement: the others
             // are static and must stay untouched.
             if (positionTargets >= 1) continue;
-            // None carries keyframes: keep only the primary candidate so the
-            // run still has a target, and skip the rest.
-            if (i > 0) continue;
+            // None carries keyframes. On the first pass keep the primary
+            // candidate so the run has a target at all; in later passes an
+            // empty set is the desired outcome and must not be re-written.
+            if (!firstPass || i > 0) continue;
         }
 
         targets.push(
@@ -1211,66 +1214,10 @@ async function planClipValues(discovery, sequence, options) {
         );
     }
 
-    const validTargets = targets.filter((target) => target !== null);
-    if (!validTargets.length) {
-        throw new Error(
-            "Kein schreibbarer Parameter trotz erfolgreicher Auflösung. " +
-                "Vorhandene Parameter: " +
-                safeJson(discovery.params)
-        );
-    }
-
-    return validTargets;
+    // An empty result is normal in later passes: nothing animates any more.
+    return targets.filter((target) => target !== null);
 }
 
-
-/**
- * Number of keyframes on the raw generated path, i.e. how many the editable
- * parameter should receive once the override is enabled.
- */
-async function countGeneratedKeyframes(plan) {
-    try {
-        const component = plan.chain.getComponentAtIndex(plan.componentIndex);
-        if (!component) return 0;
-        const index = findParamIndex(component, GENERATED_PATH_NAMES, null);
-        if (index < 0) return 0;
-        const param = component.getParam(index);
-        return param ? getKeyframeTimes(param).length : 0;
-    } catch {
-        return 0;
-    }
-}
-
-/**
- * Polls until the editable parameter exposes keyframes, re-fetching the
- * component chain each attempt. Returns false on timeout.
- */
-async function waitForKeyframes(plan, expected) {
-    // Short: a timeout is a normal outcome, not a failure.
-    const ATTEMPTS = 8;
-    const INTERVAL_MS = 120;
-
-    for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
-        try {
-            const refreshed = await plan.trackItem.getComponentChain();
-            if (refreshed) plan.chain = refreshed;
-            const component = plan.chain.getComponentAtIndex(plan.componentIndex);
-            if (component) {
-                const param = component.getParam(plan.paramIndexes[0]);
-                if (param && getKeyframeTimes(param).length > 0) {
-                    plan.keyframeWaitAttempts = attempt + 1;
-                    return true;
-                }
-            }
-        } catch {
-            /* retry */
-        }
-        await delay(INTERVAL_MS);
-    }
-
-    void expected;
-    return false;
-}
 
 // ---------------------------------------------------------------------------
 // Phase 2 — writing (synchronous, inside one transaction)
@@ -1530,14 +1477,9 @@ async function runSmoothAutoFrame(rawOptions) {
     }
 
     /*
-     * ---- Phase 2b: verify the checkbox, THEN read the reference values ----
-     *
-     * The order matters. With the checkbox off, Auto Reframe reports the
-     * editable parameters as non-keyframed with zero keyframes; the generated
-     * path is only exposed on them once the override is active. Values read
-     * before this point would be the wrong reference.
+     * ---- Phase 2b: confirm the override checkbox actually took effect ----
      */
-    const stillPlanned = [];
+    const active = [];
     for (let i = 0; i < plans.length; i++) {
         const plan = plans[i];
         if (plan.chainError) {
@@ -1577,32 +1519,9 @@ async function runSmoothAutoFrame(rawOptions) {
                 continue;
             }
 
-            /*
-             * Premiere transfers the generated path onto the editable
-             * parameter ASYNCHRONOUSLY after the checkbox is committed.
-             * Reading immediately returns zero keyframes and the neutral
-             * default — an earlier version froze that neutral value and
-             * reported success while the movement stayed untouched.
-             *
-             * So wait until the editable parameter actually exposes keyframes.
-             * The raw generated path tells us how many to expect; if it has
-             * none either, there is nothing to wait for.
-             */
-            /*
-             * Give Premiere a brief chance to transfer the generated path onto
-             * the editable parameter. It only reliably does so when the
-             * checkbox is toggled in the UI, so a timeout here is expected and
-             * NOT an error: planParam then reads the reference value straight
-             * from the generated path instead.
-             */
-            const expected = await countGeneratedKeyframes(plan);
-            if (expected > 0) {
-                plan.keyframesTransferred = await waitForKeyframes(plan, expected);
-            }
-
-            // Now that the override is active AND the keyframes are present.
-            plan.targets = await planClipValues(plan, sequence, options);
-            stillPlanned.push(plan);
+            plan.allChanges = [];
+            plan.passes = 0;
+            active.push(plan);
         } catch (error) {
             report.errors++;
             report.results.push({
@@ -1614,332 +1533,256 @@ async function runSmoothAutoFrame(rawOptions) {
         }
     }
 
-    plans.length = 0;
-    for (let i = 0; i < stillPlanned.length; i++) plans.push(stillPlanned[i]);
-
-    if (!plans.length) {
+    if (!active.length) {
         report.notes.push(
             "Kein Clip war nach dem Aktivieren der Checkbox beschreibbar."
         );
         return report;
     }
 
-    // ---- Phase 2c: pin the values, in one atomic transaction ----
-    let committed = false;
-    let transactionError = null;
-    // Problems detected while queuing actions. Collected instead of thrown:
-    // throwing out of the transaction callback would leave it to Premiere to
-    // unwind both the transaction and the surrounding lock, which is not
-    // documented behaviour.
-    const queueProblems = [];
+    /*
+     * ---- Phase 2c: freeze in repeated passes until nothing animates ----
+     *
+     * One pass is not enough. Premiere populates the position parameters
+     * ASYNCHRONOUSLY after the override is enabled, so a parameter that was
+     * empty while planning can acquire the keyframes right after the write.
+     * Measured in 26.3.2: "Position" and "Generated Keyframes" were frozen
+     * successfully, and afterwards "Position anpassen" held 32 keyframes and
+     * the picture still drifted.
+     *
+     * Each pass therefore re-reads which parameters currently animate, freezes
+     * exactly those, waits briefly for the effect to settle, and repeats.
+     */
+    /*
+     * In keyframe mode the written parameters are SUPPOSED to end up with hold
+     * keyframes, so detecting them as "animating" and freezing them again
+     * would never terminate. That mode therefore runs a single pass and is
+     * verified against the expected keyframe count instead.
+     */
+    const MAX_PASSES = options.keyframeMode ? 1 : 5;
+    const SETTLE_MS = 300;
 
-    project.lockedAccess(() => {
-        try {
-            committed = project.executeTransaction((compoundAction) => {
-                // Everything in here is synchronous by contract: no await,
-                // and every Component/ComponentParam is re-acquired fresh from
-                // the chain so no stale handle is used.
-                for (let i = 0; i < plans.length; i++) {
-                    const plan = plans[i];
+    for (let pass = 0; pass < MAX_PASSES; pass++) {
+        const pending = [];
 
-                    if (plan.chainError) {
-                        queueProblems.push({
-                            clipName: plan.clipName,
-                            reason:
-                                "Effektkette nicht mehr lesbar: " + plan.chainError
-                        });
-                        continue;
-                    }
+        for (let i = 0; i < active.length; i++) {
+            const plan = active[i];
+            if (plan.failed) continue;
 
-                    const component = plan.chain.getComponentAtIndex(plan.componentIndex);
-                    if (!component) {
-                        queueProblems.push({
-                            clipName: plan.clipName,
-                            reason:
-                                "Auto-Reframe-Komponente war beim Schreiben nicht mehr verfügbar."
-                        });
-                        continue;
-                    }
+            try {
+                const refreshed = await plan.trackItem.getComponentChain();
+                if (refreshed) plan.chain = refreshed;
 
-                    // The override checkbox was already committed in phase 2a;
-                    // here only the values are written.
-                    for (let t = 0; t < plan.targets.length; t++) {
-                        const target = plan.targets[t];
-                        const param = component.getParam(target.paramIndex);
-                        if (!param) {
-                            queueProblems.push({
-                                clipName: plan.clipName,
-                                reason:
-                                    'Parameter "' +
-                                    target.paramName +
-                                    '" war beim Schreiben nicht mehr verfügbar.'
-                            });
-                            continue;
-                        }
+                // Extras (Scale/Rotation) only need handling once.
+                const targets = await planClipValues(plan, sequence, options, pass === 0);
+                if (targets.length) pending.push({ plan: plan, targets: targets });
+            } catch (error) {
+                plan.failed = true;
+                plan.failure = describeError(error);
+            }
+        }
 
-                        const nativeValue = toNativeValue(target.value);
+        if (!pending.length) break;
 
-                        if (options.keyframeMode) {
-                            // Fallback: keep the parameter keyframed but reduce
-                            // it to identical Hold keyframes, so the value
-                            // cannot interpolate between them. Bounds come from
-                            // this parameter's own keyframe domain.
-                            compoundAction.addAction(
-                                param.createSetTimeVaryingAction(true)
-                            );
-                            compoundAction.addAction(
-                                param.createRemoveKeyframeRangeAction(
-                                    target.writeStart,
-                                    target.writeEnd,
-                                    true
-                                )
-                            );
+        let passError = null;
+        project.lockedAccess(() => {
+            try {
+                project.executeTransaction((compoundAction) => {
+                    // Synchronous by contract: no await, params re-acquired
+                    // from the freshly fetched chain.
+                    for (let i = 0; i < pending.length; i++) {
+                        const plan = pending[i].plan;
+                        const targets = pending[i].targets;
+                        const component = plan.chain.getComponentAtIndex(
+                            plan.componentIndex
+                        );
+                        if (!component) continue;
 
-                            const startKeyframe = param.createKeyframe(nativeValue);
-                            startKeyframe.position = target.writeStart;
-                            compoundAction.addAction(
-                                param.createAddKeyframeAction(startKeyframe)
-                            );
-                            compoundAction.addAction(
-                                param.createSetInterpolationAtKeyframeAction(
-                                    target.writeStart,
-                                    INTERP_MODE_HOLD,
-                                    true
-                                )
-                            );
+                        for (let t = 0; t < targets.length; t++) {
+                            const target = targets[t];
+                            const param = component.getParam(target.paramIndex);
+                            if (!param) continue;
 
-                            if (target.writeDistinctBounds) {
-                                const endKeyframe = param.createKeyframe(nativeValue);
-                                endKeyframe.position = target.writeEnd;
+                            const nativeValue = toNativeValue(target.value);
+
+                            if (options.keyframeMode) {
                                 compoundAction.addAction(
-                                    param.createAddKeyframeAction(endKeyframe)
+                                    param.createSetTimeVaryingAction(true)
+                                );
+                                compoundAction.addAction(
+                                    param.createRemoveKeyframeRangeAction(
+                                        target.writeStart,
+                                        target.writeEnd,
+                                        true
+                                    )
+                                );
+
+                                const startKeyframe = param.createKeyframe(nativeValue);
+                                startKeyframe.position = target.writeStart;
+                                compoundAction.addAction(
+                                    param.createAddKeyframeAction(startKeyframe)
                                 );
                                 compoundAction.addAction(
                                     param.createSetInterpolationAtKeyframeAction(
-                                        target.writeEnd,
+                                        target.writeStart,
                                         INTERP_MODE_HOLD,
                                         true
                                     )
                                 );
+
+                                if (target.writeDistinctBounds) {
+                                    const endKeyframe = param.createKeyframe(nativeValue);
+                                    endKeyframe.position = target.writeEnd;
+                                    compoundAction.addAction(
+                                        param.createAddKeyframeAction(endKeyframe)
+                                    );
+                                    compoundAction.addAction(
+                                        param.createSetInterpolationAtKeyframeAction(
+                                            target.writeEnd,
+                                            INTERP_MODE_HOLD,
+                                            true
+                                        )
+                                    );
+                                }
+                            } else {
+                                // Switch keyframing off and write one static
+                                // value — a parameter without keyframes is
+                                // constant by definition.
+                                compoundAction.addAction(
+                                    param.createSetTimeVaryingAction(false)
+                                );
+                                const staticKeyframe = param.createKeyframe(nativeValue);
+                                compoundAction.addAction(
+                                    param.createSetValueAction(staticKeyframe, true)
+                                );
                             }
-                        } else {
-                            // Primary path: switch keyframing off entirely and
-                            // write one static value. A parameter without
-                            // keyframes is constant by definition — the direct
-                            // equivalent of turning the stopwatch off in the
-                            // Effect Controls panel.
-                            compoundAction.addAction(
-                                param.createSetTimeVaryingAction(false)
-                            );
-                            const staticKeyframe = param.createKeyframe(nativeValue);
-                            compoundAction.addAction(
-                                param.createSetValueAction(staticKeyframe, true)
-                            );
                         }
                     }
-                }
-            }, "Smooth Auto Frame");
-        } catch (error) {
-            transactionError = error;
-        }
-    });
-
-    if (transactionError) {
-        // The transaction is all-or-nothing: nothing was applied, so there is
-        // no partially-destroyed state to repair.
-        report.errors += plans.length;
-        for (let i = 0; i < plans.length; i++) {
-            report.results.push({
-                clipName: plans[i].clipName,
-                status: "error",
-                reason: describeError(transactionError)
-            });
-        }
-        report.notes.push(
-            "Transaktion fehlgeschlagen — es wurden keine Änderungen übernommen."
-        );
-        return report;
-    }
-
-    if (!committed) {
-        report.errors += plans.length;
-        for (let i = 0; i < plans.length; i++) {
-            report.results.push({
-                clipName: plans[i].clipName,
-                status: "error",
-                reason: "Premiere hat die Transaktion abgelehnt."
-            });
-        }
-        return report;
-    }
-
-    // Clips whose handles went stale while queuing: nothing was written for
-    // them, but the rest of the transaction did commit.
-    const failedClipNames = {};
-    for (let i = 0; i < queueProblems.length; i++) {
-        const problem = queueProblems[i];
-        failedClipNames[problem.clipName] = true;
-        report.errors++;
-        report.results.push({
-            clipName: problem.clipName,
-            status: "error",
-            reason: problem.reason
+                }, "Smooth Auto Frame — Werte fixieren");
+            } catch (error) {
+                passError = error;
+            }
         });
+
+        if (passError) {
+            for (let i = 0; i < pending.length; i++) {
+                pending[i].plan.failed = true;
+                pending[i].plan.failure = describeError(passError);
+            }
+            break;
+        }
+
+        for (let i = 0; i < pending.length; i++) {
+            const plan = pending[i].plan;
+            plan.passes = pass + 1;
+            if (!plan.writtenTargets) plan.writtenTargets = {};
+            for (let t = 0; t < pending[i].targets.length; t++) {
+                const target = pending[i].targets[t];
+                plan.writtenTargets[target.paramIndex] = target;
+                plan.allChanges.push({
+                    pass: pass + 1,
+                    param: target.paramName,
+                    value: describeValue(target.value),
+                    readFrom: target.readFrom,
+                    readParam: target.readParamName,
+                    keyframesBefore: target.keyframeCount
+                });
+            }
+        }
+
+        // Give the effect a moment to repopulate before the next pass.
+        await delay(SETTLE_MS);
     }
 
     /*
-     * ---- Phase 3: verify what actually happened ----
+     * ---- Phase 3: final verification across ALL position parameters ----
      *
-     * A committed transaction does NOT mean the effect accepted the change.
-     * An earlier version reported "pinned to a constant value" while the
-     * keyframes were still there and the override checkbox was still off.
-     * Success is therefore no longer assumed — it is read back and compared.
+     * The success criterion is that NO position-carrying parameter animates
+     * any more. Checking only the one that was written is what previously
+     * produced a success message while the movement had merely moved to a
+     * sibling parameter.
      */
-    for (let i = 0; i < plans.length; i++) {
-        const plan = plans[i];
-        if (failedClipNames[plan.clipName]) continue;
+    for (let i = 0; i < active.length; i++) {
+        const plan = active[i];
 
-        const changes = [];
-        const problems = [];
-        let appliedState = null;
-
+        let paramsAfter = null;
+        const stillAnimating = [];
 
         try {
             const refreshed = await plan.trackItem.getComponentChain();
             if (refreshed) plan.chain = refreshed;
             const component = plan.chain.getComponentAtIndex(plan.componentIndex);
+            if (component) {
+                paramsAfter = await describeComponentParams(component);
 
-            for (let t = 0; t < plan.targets.length; t++) {
-                const target = plan.targets[t];
-                const param = component ? component.getParam(target.paramIndex) : null;
-                if (!param) {
-                    problems.push(
-                        'Parameter "' + target.paramName + '" nach dem Schreiben nicht lesbar.'
-                    );
-                    continue;
-                }
-
-                const keyframesAfter = getKeyframeTimes(param).length;
-                let stillVarying = null;
-                try {
-                    stillVarying = param.isTimeVarying();
-                } catch {
-                    stillVarying = null;
-                }
-
-                const expectedKeyframes = options.keyframeMode
-                    ? target.writeDistinctBounds
-                        ? 2
-                        : 1
-                    : 0;
-
-                if (keyframesAfter !== expectedKeyframes) {
-                    problems.push(
-                        'Parameter "' +
-                            target.paramName +
-                            '": erwartet ' +
-                            expectedKeyframes +
-                            " Keyframes, tatsächlich " +
-                            keyframesAfter +
-                            " (vorher " +
-                            target.keyframeCount +
-                            ")."
-                    );
-                }
-
-                if (!options.keyframeMode && stillVarying === true) {
-                    problems.push(
-                        'Parameter "' +
-                            target.paramName +
-                            '" ist weiterhin animiert (Stoppuhr an).'
-                    );
-                }
-
-                changes.push({
-                    param: target.paramName,
-                    value: describeValue(target.value),
-                    readFrom: target.readFrom,
-                    readParam: target.readParamName,
-                    keyframesBefore: target.keyframeCount,
-                    keyframesAfter: keyframesAfter,
-                    timeVaryingAfter: stillVarying
-                });
-            }
-            /*
-             * The decisive criterion. Everything above only proves the written
-             * parameter is static. What actually matters is whether the APPLIED
-             * position stopped animating — an earlier version froze a neutral
-             * adjustment value and reported success while "Position" kept its
-             * keyframes and the clip kept drifting.
-             */
-            const appliedIndex = component
-                ? findParamIndex(component, APPLIED_POSITION_NAMES, null)
-                : -1;
-            const appliedIsTarget =
-                appliedIndex >= 0 &&
-                plan.targets.some((t) => t.paramIndex === appliedIndex);
-            if (appliedIndex >= 0 && !appliedIsTarget) {
-                const applied = component.getParam(appliedIndex);
-                if (applied) {
-                    const appliedKeyframes = getKeyframeTimes(applied).length;
-                    let appliedVarying = null;
+                for (let c = 0; c < plan.positionIndexCount; c++) {
+                    const index = plan.paramIndexes[c];
+                    const param = component.getParam(index);
+                    if (!param) continue;
+                    const count = getKeyframeTimes(param).length;
+                    let varying = null;
                     try {
-                        appliedVarying = applied.isTimeVarying();
+                        varying = param.isTimeVarying();
                     } catch {
-                        appliedVarying = null;
+                        varying = null;
+                    }
+                    const written =
+                        plan.writtenTargets && plan.writtenTargets[index];
+                    let expected = 0;
+                    if (options.keyframeMode && written) {
+                        expected = written.writeDistinctBounds ? 2 : 1;
                     }
 
-                    appliedState = {
-                        param: applied.displayName,
-                        keyframes: appliedKeyframes,
-                        timeVarying: appliedVarying
-                    };
-
-                    if (appliedKeyframes > 0 || appliedVarying === true) {
-                        problems.push(
-                            'Die angewandte Position ("' +
-                                applied.displayName +
-                                '") animiert weiterhin (' +
-                                appliedKeyframes +
-                                " Keyframes). Die Bewegung ist also NICHT entfernt, " +
-                                'obwohl "' +
-                                plan.targets[0].paramName +
-                                '" fixiert wurde.'
-                        );
+                    if (count !== expected) {
+                        stillAnimating.push({
+                            index: index,
+                            param: param.displayName,
+                            keyframes: count,
+                            expected: expected,
+                            timeVarying: varying
+                        });
                     }
                 }
             }
         } catch (error) {
-            problems.push("Nachprüfung fehlgeschlagen: " + describeError(error));
+            plan.failed = true;
+            plan.failure = describeError(error);
         }
 
-        /*
-         * Full post-run parameter state. Auto Reframe exposes several related
-         * position parameters ("Position", "Position anpassen", "Generated
-         * Keyframes"); only one is written, and this records whether the others
-         * settled as a consequence. Without it there is no way to tell whether
-         * freezing the right parameter actually stopped the movement.
-         */
-        let paramsAfter = null;
-        try {
-            const component = plan.chain.getComponentAtIndex(plan.componentIndex);
-            if (component) paramsAfter = await describeComponentParams(component);
-        } catch {
-            paramsAfter = null;
+        if (plan.failed) {
+            report.errors++;
+            report.results.push({
+                clipName: plan.clipName,
+                status: "error",
+                reason: plan.failure,
+                changes: plan.allChanges,
+                passes: plan.passes,
+                params: plan.params,
+                paramsAfter: paramsAfter
+            });
+            continue;
         }
 
-        if (problems.length) {
+        if (stillAnimating.length) {
+            const names = stillAnimating.map(
+                (entry) =>
+                    '"' + entry.param + '" (Index ' + entry.index + ", " +
+                    entry.keyframes + " Keyframes)"
+            );
             report.errors++;
             report.results.push({
                 clipName: plan.clipName,
                 status: "error",
                 reason:
-                    "Schreiben wurde nicht übernommen. " +
-                    problems.join(" ") +
-                    " Parameter des Effekts: " +
-                    safeJson(paramsAfter || plan.params),
-                changes: changes,
-                appliedPosition: appliedState,
+                    "Die Bewegung ist NICHT entfernt. Nach " +
+                    plan.passes +
+                    " Durchläufen animieren weiterhin: " +
+                    names.join(", ") +
+                    ". Premiere füllt diese Parameter asynchron nachträglich " +
+                    "wieder, schneller als sie eingefroren werden können.",
+                changes: plan.allChanges,
+                stillAnimating: stillAnimating,
+                passes: plan.passes,
                 params: plan.params,
                 paramsAfter: paramsAfter
             });
@@ -1950,21 +1793,24 @@ async function runSmoothAutoFrame(rawOptions) {
         report.results.push({
             clipName: plan.clipName,
             status: "ok",
-            reason: options.keyframeMode
-                ? "Auf Hold-Keyframes reduziert und nachgeprüft."
-                : "Auf konstanten Wert fixiert und nachgeprüft (keine Keyframes mehr).",
-            changes: changes,
-            appliedPosition: appliedState,
+            reason:
+                (options.keyframeMode
+                    ? "Auf Hold-Keyframes reduziert"
+                    : "Auf konstanten Wert fixiert") +
+                " und nachgeprüft: kein Positions-Parameter animiert mehr" +
+                (plan.passes > 1 ? " (" + plan.passes + " Durchläufe)" : "") +
+                ".",
+            changes: plan.allChanges,
+            passes: plan.passes,
             overrideResolvedBy: plan.overrideResolvedBy,
-            keyframeWaitAttempts: plan.keyframeWaitAttempts || null,
             paramsAfter: paramsAfter
         });
     }
 
     if (report.processed > 0) {
         report.notes.push(
-            "Ein Lauf besteht aus zwei Undo-Schritten: zuerst die Werte, " +
-                "dann die Override-Checkbox."
+            "Ein Lauf besteht aus mehreren Undo-Schritten: pro Durchlauf einer, " +
+                "plus einer für die Override-Checkbox."
         );
     }
     return report;

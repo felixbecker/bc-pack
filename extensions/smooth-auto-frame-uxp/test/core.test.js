@@ -316,7 +316,10 @@ function reset() { log.length = 0; }
         assert.strictEqual(s.position._static.x, 0.50, "falscher Wert fixiert");
         const change = r.results[0].changes[0];
         assert.strictEqual(change.keyframesBefore, 3);
-        assert.strictEqual(change.keyframesAfter, 0, "Nachprüfung meldet Keyframes");
+        // Der Endzustand wird jetzt in Phase 3 geprueft, nicht pro Change.
+        const after = r.results[0].paramsAfter.find((x) => x.name === "Position");
+        assert.strictEqual(after.keyframes, 0, "paramsAfter meldet Keyframes");
+        assert.strictEqual(after.timeVarying, false, "noch animiert");
     });
 
     await t("REGRESSION: verworfener Schreibvorgang wird als Fehler gemeldet", async () => {
@@ -575,10 +578,16 @@ function reset() { log.length = 0; }
         const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
         assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
         assert.ok(reveals > 0, "es wurde nie zu frueh gelesen - Test greift nicht");
-        // Entscheidend: der ECHTE erste Keyframe-Wert, nicht der neutrale 0.5.
+        /*
+         * Entscheidend: der ECHTE Keyframe-Wert, nicht der neutrale 0.5.
+         * Beim ersten Durchlauf ist der Parameter noch leer; die verzoegert
+         * erscheinenden Keyframes werden in einem spaeteren Durchlauf erfasst.
+         */
         assert.ok(Math.abs(adjust._static.x - 0.6889) < 1e-9,
             "neutraler Wert eingefroren statt echtem: " + adjust._static.x);
-        assert.ok(r.results[0].keyframeWaitAttempts >= 1, "keine Wartezyklen protokolliert");
+        assert.ok(r.results[0].passes >= 2,
+            "nur " + r.results[0].passes + " Durchlauf - verzoegerte Keyframes nicht erfasst");
+        assert.strictEqual(adjust._keys.length, 0, "Keyframes nicht entfernt");
     });
 
     await t("Nur der erzeugte Pfad traegt Keyframes -> nur dieser wird eingefroren", async () => {
@@ -620,6 +629,61 @@ function reset() { log.length = 0; }
         // Unbeteiligte Parameter bleiben unberuehrt.
         assert.ok(Math.abs(adjust._static.x - 0.5) < 1e-9,
             "Position anpassen wurde ungefragt veraendert: " + adjust._static.x);
+    });
+
+    await t("REGRESSION: nachträglich befüllter Geschwisterparameter wird erfasst", async () => {
+        /*
+         * Realfall Premiere 26.3.2 (d7-Log): "Position" und "Generated
+         * Keyframes" wurden erfolgreich eingefroren, danach hielt
+         * "Position anpassen" 32 Keyframes und das Bild wackelte weiter.
+         * Premiere befuellt den Parameter asynchron NACH dem Schreiben.
+         * Mehrere Durchlaeufe muessen das einsammeln.
+         */
+        let frozenOnce = false;
+
+        const override = new MockParam("Erzeugten Pfad überschreiben", [], false, false);
+        const applied = new MockParam("Position", [
+            { t: S(1), v: new PointF(0.70, 0.5) },
+            { t: S(2), v: new PointF(0.78, 0.5) }
+        ], null, true);
+        const generated = new MockParam("Generated Keyframes", [
+            { t: S(1), v: new PointF(0.70, 0.5) },
+            { t: S(2), v: new PointF(0.78, 0.5) }
+        ], null, true);
+        // Startet leer; wird befuellt, sobald "Position" eingefroren wurde.
+        const adjust = new MockParam("Position anpassen", [], new PointF(0.5, 0.5), false);
+
+        const origAppliedTv = applied.createSetTimeVaryingAction.bind(applied);
+        applied.createSetTimeVaryingAction = function (b) {
+            const action = origAppliedTv(b);
+            const origApply = action.apply;
+            action.apply = () => {
+                origApply();
+                if (b === false && !frozenOnce) {
+                    frozenOnce = true;
+                    // Premiere schiebt den Pfad jetzt nach.
+                    adjust._tv = true;
+                    adjust._keys = [
+                        { t: S(1), v: new PointF(0.70, 0.5), interp: null },
+                        { t: S(2), v: new PointF(0.78, 0.5), interp: null }
+                    ];
+                }
+            };
+            return action;
+        };
+
+        makeScenario([override, applied, adjust, generated], { clipName: "sibling.mov" });
+
+        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
+        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
+        assert.strictEqual(r.processed, 1);
+        assert.ok(frozenOnce, "Nachbefuellung wurde nie ausgeloest");
+        assert.ok(r.results[0].passes >= 2,
+            "nur " + r.results[0].passes + " Durchlauf - Geschwister nicht erfasst");
+        // Nichts darf mehr animieren.
+        assert.strictEqual(applied._keys.length, 0, "Position noch animiert");
+        assert.strictEqual(adjust._keys.length, 0, "Position anpassen noch animiert");
+        assert.strictEqual(generated._keys.length, 0, "Generated noch animiert");
     });
 
     await t("Referenz 'end' nimmt den LETZTEN Keyframe-Wert", async () => {
