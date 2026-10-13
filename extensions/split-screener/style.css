@@ -1,0 +1,137 @@
+body {
+    margin: 0;
+    padding: 0;
+    font-size: 12px;
+    color: #d9d9d9;
+}
+
+.wrapper {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+}
+
+.subtitle,
+.hint {
+    color: #9a9a9a;
+}
+
+.hint {
+    margin-top: 2px;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.status {
+    min-height: 14px;
+    color: #9a9a9a;
+}
+
+.summary {
+    display: none;
+    flex-direction: row;
+    gap: 8px;
+}
+
+.summary.visible {
+    display: flex;
+}
+
+.pill {
+    border-radius: 10px;
+    padding: 2px 8px;
+    font-size: 11px;
+}
+
+.pill.ok {
+    background-color: #1f3d24;
+    color: #7bd189;
+}
+
+.pill.skipped {
+    background-color: #40381c;
+    color: #e0c468;
+}
+
+.pill.error {
+    background-color: #44211f;
+    color: #ef8b89;
+}
+
+.log {
+    border: 1px solid #4a4a4a;
+    border-radius: 4px;
+    background-color: #383838;
+    padding: 4px;
+    max-height: 260px;
+    overflow-y: auto;
+}
+
+.log-entry {
+    padding: 4px 6px;
+    border-bottom: 1px solid #4a4a4a;
+}
+
+.log-entry:last-child {
+    border-bottom: none;
+}
+
+.clip-name {
+    font-weight: bold;
+}
+
+.log-entry.status-ok .clip-name {
+    color: #7bd189;
+}
+
+.log-entry.status-skipped .clip-name {
+    color: #e0c468;
+}
+
+.log-entry.status-error .clip-name {
+    color: #ef8b89;
+}
+
+.reason,
+.changes {
+    color: #9a9a9a;
+    font-size: 11px;
+}
+
+.validation {
+    color: #ef8b89;
+    font-size: 11px;
+    padding: 2px 6px;
+}
+
+.fatal-error {
+    border: 1px solid #ef8b89;
+    border-radius: 4px;
+    background-color: #44211f;
+    color: #ef8b89;
+    padding: 8px;
+}
+
+.diagnostic-line {
+    font-family: monospace;
+    font-size: 11px;
+    white-space: pre-wrap;
+    color: #c8c8c8;
+}
+
+.empty-state {
+    color: #9a9a9a;
+    text-align: center;
+    padding: 14px 4px;
+}

@@ -1,0 +1,16 @@
+{
+    "name": "split-screener",
+    "version": "1.1.0",
+    "description": "Premiere Pro UXP plugin that builds a 50/50 split screen from two congruent clips on different video tracks.",
+    "private": true,
+    "scripts": {
+        "lint": "eslint .",
+        "test": "node --test test/*.test.js"
+    },
+    "devDependencies": {
+        "@adobe/eslint-plugin-premierepro": "26.5.0",
+        "@adobe/premierepro": "26.5.0",
+        "@eslint/js": "9.39.0",
+        "eslint": "9.39.0"
+    }
+}

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="style.css" />
+    <script src="main.js"></script>
+</head>
+<body>
+    <div class="wrapper">
+        <sp-heading size="S">Split Screener</sp-heading>
+        <sp-body size="XS" class="subtitle">
+            Macht aus zwei deckungsgleichen Clips auf verschiedenen Spuren einen
+            50/50-Splitscreen. Clips in der Timeline auswählen.
+        </sp-body>
+        <sp-divider size="S"></sp-divider>
+
+        <div class="field">
+            <sp-label for="layoutOption" size="S">Anordnung</sp-label>
+            <sp-picker id="layoutOption" size="S">
+                <sp-menu slot="options">
+                    <sp-menu-item value="columns" selected>
+                        Nebeneinander (links / rechts)
+                    </sp-menu-item>
+                    <sp-menu-item value="rows">
+                        Übereinander (oben / unten)
+                    </sp-menu-item>
+                </sp-menu>
+            </sp-picker>
+            <sp-body size="XS" class="hint">
+                Der Clip auf der niedrigeren Spur kommt nach links bzw. oben.
+            </sp-body>
+        </div>
+
+        <div class="field">
+            <sp-label size="S">Optionen</sp-label>
+            <sp-checkbox id="swapClips" size="S">Clips tauschen</sp-checkbox>
+            <sp-checkbox id="dryRun" size="S" checked>
+                Dry-Run (nur Vorschau, schreibt nichts)
+            </sp-checkbox>
+        </div>
+
+        <sp-divider size="S"></sp-divider>
+
+        <div class="actions">
+            <sp-button id="createButton" variant="accent" size="S">
+                Splitscreen erstellen
+            </sp-button>
+            <sp-button id="removeButton" variant="secondary" treatment="outline" size="S">
+                Splitscreen entfernen
+            </sp-button>
+        </div>
+
+        <div class="actions">
+            <sp-button id="diagnoseButton" variant="secondary" treatment="outline" size="S">
+                Diagnose
+            </sp-button>
+            <sp-button id="clearButton" variant="secondary" treatment="outline" size="S">
+                Log leeren
+            </sp-button>
+        </div>
+
+        <div class="actions">
+            <sp-button id="copyButton" variant="secondary" treatment="outline" size="S" disabled>
+                Log kopieren
+            </sp-button>
+            <sp-button id="saveButton" variant="secondary" treatment="outline" size="S" disabled>
+                Log speichern…
+            </sp-button>
+        </div>
+
+        <sp-body size="XS" id="statusBar" class="status"></sp-body>
+
+        <div id="summary" class="summary">
+            <span class="pill ok" id="summaryOk">Verarbeitet: 0</span>
+            <span class="pill skipped" id="summarySkipped">Übersprungen: 0</span>
+            <span class="pill error" id="summaryError">Fehler: 0</span>
+        </div>
+
+        <div id="log" class="log"></div>
+    </div>
+</body>
+</html>

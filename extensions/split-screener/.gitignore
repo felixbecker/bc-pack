@@ -1,0 +1,4 @@
+node_modules/
+*.ccx
+*.log
+.DS_Store
