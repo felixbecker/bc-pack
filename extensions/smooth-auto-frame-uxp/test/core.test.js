@@ -271,6 +271,28 @@ function linkAppliedPosition(applied, source) {
     return applied;
 }
 
+/**
+ * Value a parameter was pinned to. Default mode leaves exactly ONE keyframe
+ * (the tutorial's workflow), static mode leaves none.
+ */
+function pinnedValue(param) {
+    if (param._keys.length === 1) return param._keys[0].v;
+    if (param._keys.length === 0) return param._static;
+    return null;
+}
+
+/** Asserts a parameter no longer animates and holds the expected x value. */
+function assertPinned(param, expectedX, label) {
+    const name = label || param.displayName;
+    assert.ok(param._keys.length <= 1,
+        name + " animiert noch (" + param._keys.length + " Keyframes)");
+    const v = pinnedValue(param);
+    assert.ok(v && typeof v.x === "number",
+        name + ": kein Punktwert (" + JSON.stringify(v) + ")");
+    assert.ok(Math.abs(v.x - expectedX) < 1e-6,
+        name + ": erwartet x=" + expectedX + ", war " + v.x);
+}
+
 function reset() { log.length = 0; }
 
 // ---- Tests -----------------------------------------------------------------
@@ -310,16 +332,14 @@ function reset() { log.length = 0; }
         const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
         assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
         assert.strictEqual(r.processed, 1);
-        assert.strictEqual(s.position._tv, false, "Position ist noch animiert");
-        assert.strictEqual(s.position._keys.length, 0, "Keyframes noch vorhanden");
-        assert.ok(s.position._static instanceof PointF, "Wert ist kein PointF");
-        assert.strictEqual(s.position._static.x, 0.50, "falscher Wert fixiert");
+        // Standard: genau EIN Keyframe bleibt, wie im Tutorial.
+        assert.strictEqual(s.position._keys.length, 1, "erwartet genau 1 Keyframe");
+        assertPinned(s.position, 0.50, "Position");
         const change = r.results[0].changes[0];
         assert.strictEqual(change.keyframesBefore, 3);
         // Der Endzustand wird jetzt in Phase 3 geprueft, nicht pro Change.
         const after = r.results[0].paramsAfter.find((x) => x.name === "Position");
-        assert.strictEqual(after.keyframes, 0, "paramsAfter meldet Keyframes");
-        assert.strictEqual(after.timeVarying, false, "noch animiert");
+        assert.strictEqual(after.keyframes, 1, "erwartet genau 1 Keyframe in paramsAfter");
     });
 
     await t("REGRESSION: verworfener Schreibvorgang wird als Fehler gemeldet", async () => {
@@ -475,9 +495,7 @@ function reset() { log.length = 0; }
         assert.strictEqual(r.processed, 1);
         // Der erste Keyframe-Wert (0.81) ist nur sichtbar, wenn NACH dem
         // Aktivieren gelesen wurde. Vorher waere der statische 0.0 gelesen worden.
-        assert.ok(position._static instanceof PointF, "kein PointF");
-        assert.strictEqual(position._static.x, 0.81,
-            "falscher Referenzwert -> zu frueh gelesen: " + position._static.x);
+        assertPinned(position, 0.81, "Position anpassen (zu frueh gelesen?)");
     });
 
     await t("Checkbox ohne Anzeigenamen wird per bekanntem Index aufgelöst", async () => {
@@ -520,9 +538,8 @@ function reset() { log.length = 0; }
         const changedNames = r.results[0].changes.map((c) => c.param);
         assert.ok(changedNames.includes("Position anpassen"),
             "Position anpassen fehlt: " + changedNames);
-        assert.strictEqual(p[6]._keys.length, 0, "Index 6 nicht bereinigt");
-        // Neuer Vertrag: die angewandte Position wird ebenfalls eingefroren.
-        assert.strictEqual(p[2]._keys.length, 0, "Index 2 nicht bereinigt");
+        assert.ok(p[6]._keys.length <= 1, "Index 6 animiert noch");
+        assert.ok(p[2]._keys.length <= 1, "Index 2 animiert noch");
         assert.strictEqual(r.results[0].overrideResolvedBy, "index",
             "Auflösungsart nicht protokolliert");
         assert.ok(r.results[0].paramsAfter, "paramsAfter fehlt");
@@ -583,11 +600,9 @@ function reset() { log.length = 0; }
          * Beim ersten Durchlauf ist der Parameter noch leer; die verzoegert
          * erscheinenden Keyframes werden in einem spaeteren Durchlauf erfasst.
          */
-        assert.ok(Math.abs(adjust._static.x - 0.6889) < 1e-9,
-            "neutraler Wert eingefroren statt echtem: " + adjust._static.x);
+        assertPinned(adjust, 0.6889, "Position anpassen");
         assert.ok(r.results[0].passes >= 2,
             "nur " + r.results[0].passes + " Durchlauf - verzoegerte Keyframes nicht erfasst");
-        assert.strictEqual(adjust._keys.length, 0, "Keyframes nicht entfernt");
     });
 
     await t("Nur der erzeugte Pfad traegt Keyframes -> nur dieser wird eingefroren", async () => {
@@ -623,9 +638,7 @@ function reset() { log.length = 0; }
         const change = r.results[0].changes[0];
         assert.strictEqual(change.readFrom, "target", "Quelle: " + change.readFrom);
         assert.strictEqual(change.keyframesBefore, 2);
-        assert.strictEqual(generated._keys.length, 0, "Generated Keyframes nicht bereinigt");
-        assert.ok(Math.abs(generated._static.x - 0.6889) < 1e-9,
-            "falscher Wert eingefroren: " + generated._static.x);
+        assertPinned(generated, 0.6889, "Generated Keyframes");
         // Unbeteiligte Parameter bleiben unberuehrt.
         assert.ok(Math.abs(adjust._static.x - 0.5) < 1e-9,
             "Position anpassen wurde ungefragt veraendert: " + adjust._static.x);
@@ -653,13 +666,13 @@ function reset() { log.length = 0; }
         // Startet leer; wird befuellt, sobald "Position" eingefroren wurde.
         const adjust = new MockParam("Position anpassen", [], new PointF(0.5, 0.5), false);
 
-        const origAppliedTv = applied.createSetTimeVaryingAction.bind(applied);
-        applied.createSetTimeVaryingAction = function (b) {
-            const action = origAppliedTv(b);
+        const origAppliedAdd = applied.createAddKeyframeAction.bind(applied);
+        applied.createAddKeyframeAction = function (kf) {
+            const action = origAppliedAdd(kf);
             const origApply = action.apply;
             action.apply = () => {
                 origApply();
-                if (b === false && !frozenOnce) {
+                if (!frozenOnce) {
                     frozenOnce = true;
                     // Premiere schiebt den Pfad jetzt nach.
                     adjust._tv = true;
@@ -681,28 +694,28 @@ function reset() { log.length = 0; }
         assert.ok(r.results[0].passes >= 2,
             "nur " + r.results[0].passes + " Durchlauf - Geschwister nicht erfasst");
         // Nichts darf mehr animieren.
-        assert.strictEqual(applied._keys.length, 0, "Position noch animiert");
-        assert.strictEqual(adjust._keys.length, 0, "Position anpassen noch animiert");
-        assert.strictEqual(generated._keys.length, 0, "Generated noch animiert");
+        assertPinned(applied, 0.70, "Position");
+        assertPinned(adjust, 0.70, "Position anpassen");
+        assertPinned(generated, 0.70, "Generated Keyframes");
     });
 
     await t("Referenz 'end' nimmt den LETZTEN Keyframe-Wert", async () => {
         const s = buildScenario();
         await runSmoothAutoFrame({ timing: "end", dryRun: false });
-        assert.strictEqual(s.position._static.x, 0.60, "x war " + s.position._static.x);
+        assertPinned(s.position, 0.60, "Position (end)");
     });
 
     await t("Mittelwert-Modus mittelt PointF korrekt", async () => {
         const s = buildScenario();
         await runSmoothAutoFrame({ timing: "average", dryRun: false });
         const expected = (0.50 + 0.54 + 0.60) / 3;
-        assert.ok(Math.abs(s.position._static.x - expected) < 1e-9, "x=" + s.position._static.x);
+        assertPinned(s.position, expected, "Position (average)");
     });
 
     await t("Playhead-Modus rechnet Sequenzzeit in Clipzeit um", async () => {
         const s = buildScenario(); // start=10s, inPoint=1s, playhead=11s -> 2s
         await runSmoothAutoFrame({ timing: "playhead", dryRun: false });
-        assert.strictEqual(s.position._static.x, 0.54, "x war " + s.position._static.x);
+        assertPinned(s.position, 0.54, "Position (playhead)");
     });
 
     await t("Rotation == 0 wird geschrieben (N1-Regression)", async () => {
@@ -722,20 +735,43 @@ function reset() { log.length = 0; }
         reset();
         const s2 = buildScenario();
         await runSmoothAutoFrame({ timing: "start", fixScale: true, dryRun: false });
-        assert.strictEqual(s2.scale._keys.length, 0, "Scale-Keyframes nicht entfernt");
-        assert.strictEqual(s2.scale._static, 1.0, "Scale-Wert falsch: " + s2.scale._static);
+        assert.ok(s2.scale._keys.length <= 1, "Scale animiert noch");
+        const scaleValue = s2.scale._keys.length === 1
+            ? s2.scale._keys[0].v
+            : s2.scale._static;
+        assert.strictEqual(scaleValue, 1.0, "Scale-Wert falsch: " + scaleValue);
     });
 
-    await t("Keyframe-Modus: Hold-Keys in der Keyframe-Domäne", async () => {
+    await t("Standardmodus schreibt GENAU EINEN Keyframe am Referenzzeitpunkt", async () => {
+        /*
+         * Der Algorithmus aus dem Tutorial: alle Keyframes loeschen, dann
+         * genau einen mit dem gewaehlten Wert setzen. Der Autor weist darauf
+         * hin, dass Premiere mindestens einen Keyframe auf der Property
+         * erwartet - zwei zu schreiben (frueherer Stand) weicht davon ab.
+         */
         const s = buildScenario();
-        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false, keyframeMode: true });
+        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
         assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
+
         const rr = log.find((l) => l.kind === "removeRange" && l.param === "Position");
-        assert.strictEqual(rr.from, S(1), "Bereichsstart");
-        assert.strictEqual(rr.to, S(3), "Bereichsende");
-        assert.strictEqual(s.position._keys.length, 2, "erwartet 2 Hold-Keyframes");
-        assert.deepStrictEqual(s.position._keys.map((k) => k.t), [S(1), S(3)]);
-        assert.ok(s.position._keys.every((k) => k.interp === 4), "Interpolation nicht Hold");
+        assert.ok(rr, "Keyframes wurden nicht geloescht");
+        assert.strictEqual(rr.from, S(1), "Loeschbereich Start");
+        assert.strictEqual(rr.to, S(3), "Loeschbereich Ende");
+
+        const adds = log.filter((l) => l.kind === "addKeyframe" && l.param === "Position");
+        assert.strictEqual(adds.length, 1, "erwartet GENAU 1 Keyframe, waren " + adds.length);
+        assert.strictEqual(adds[0].position, S(1), "Keyframe nicht am Referenzzeitpunkt");
+        assert.strictEqual(s.position._keys.length, 1, "Endzustand: nicht 1 Keyframe");
+        assertPinned(s.position, 0.50, "Position");
+    });
+
+    await t("Option 'konstanter Wert' schreibt gar keinen Keyframe", async () => {
+        const s = buildScenario();
+        const r = await runSmoothAutoFrame({ timing: "start", dryRun: false, staticValue: true });
+        assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
+        assert.strictEqual(s.position._keys.length, 0, "es wurden Keyframes geschrieben");
+        assert.strictEqual(s.position._tv, false, "noch animiert");
+        assertPinned(s.position, 0.50, "Position");
     });
 
     await t("Unbekannte Timing-Option fällt auf 'start' zurück (Whitelist)", async () => {
@@ -799,13 +835,10 @@ function reset() { log.length = 0; }
         assert.ok(names.includes("Position anpassen"), "Position anpassen fehlt: " + names);
         assert.ok(names.includes("Generated Keyframes"), "Generated Keyframes fehlt: " + names);
 
-        assert.strictEqual(applied._keys.length, 0, "Position nicht bereinigt");
-        assert.strictEqual(adjust._keys.length, 0, "Position anpassen nicht bereinigt");
-        assert.strictEqual(generated._keys.length, 0, "Generated Keyframes nicht bereinigt");
         // Jeder haelt seinen EIGENEN Wert zum Referenzzeitpunkt.
-        assert.strictEqual(applied._static.x, 0.68, "Position: " + applied._static.x);
-        assert.strictEqual(adjust._static.x, 0.72, "Adjust: " + adjust._static.x);
-        assert.strictEqual(generated._static.x, 0.5, "Generated: " + generated._static.x);
+        assertPinned(applied, 0.68, "Position");
+        assertPinned(adjust, 0.72, "Position anpassen");
+        assertPinned(generated, 0.5, "Generated Keyframes");
     });
 
     await t("Parameter-Dump enthält Werte und Werttypen", async () => {
@@ -862,9 +895,7 @@ function reset() { log.length = 0; }
             const s = buildShapeScenario(make());
             const r = await runSmoothAutoFrame({ timing: "start", dryRun: false });
             assert.strictEqual(r.errors, 0, "Fehler: " + JSON.stringify(r.results));
-            assert.ok(s.position._static instanceof PointF, "Wert ist kein PointF");
-            assert.ok(Math.abs(s.position._static.x - expectedX) < 1e-9,
-                "x=" + s.position._static.x);
+            assertPinned(s.position, expectedX, "Position (" + label + ")");
         });
     }
 

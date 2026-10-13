@@ -36,12 +36,14 @@
         <div class="field">
             <sp-label size="S">Ausführung</sp-label>
             <sp-checkbox id="dryRun" size="S" checked>Dry-Run (nur Vorschau)</sp-checkbox>
-            <sp-checkbox id="keyframeMode" size="S">
-                Keyframe-Modus (Fallback)
+            <sp-checkbox id="staticValue" size="S">
+                Konstanter Wert ohne Keyframes
             </sp-checkbox>
             <sp-body size="XS" class="hint">
-                Standard schreibt einen echten konstanten Wert ohne Keyframes.
-                Der Fallback setzt stattdessen zwei Hold-Keyframes.
+                Standard: alle Keyframes löschen und genau einen am gewählten
+                Referenz-Frame setzen — der Ablauf aus dem Tutorial. Die Option
+                schaltet Keyframing stattdessen ganz ab; Premiere überträgt den
+                erzeugten Pfad dann teils erneut.
             </sp-body>
         </div>
 

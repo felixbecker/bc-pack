@@ -32,7 +32,7 @@ function cacheElements() {
     el.fixScale = document.getElementById("fixScale");
     el.fixRotation = document.getElementById("fixRotation");
     el.dryRun = document.getElementById("dryRun");
-    el.keyframeMode = document.getElementById("keyframeMode");
+    el.staticValue = document.getElementById("staticValue");
     el.runButton = document.getElementById("runButton");
     el.clearButton = document.getElementById("clearButton");
     el.copyButton = document.getElementById("copyButton");
@@ -206,7 +206,7 @@ function readOptions() {
         fixScale: !!el.fixScale.checked,
         fixRotation: !!el.fixRotation.checked,
         dryRun: !!el.dryRun.checked,
-        keyframeMode: !!el.keyframeMode.checked
+        staticValue: !!el.staticValue.checked
     };
 }
 

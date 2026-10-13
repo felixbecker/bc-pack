@@ -195,8 +195,6 @@ const SCALE_FRAGMENTS = ["scale", "skalier", "zoom"];
 const ROTATION_PARAM_NAMES = ["adjust rotation", "rotation", "drehung"];
 const ROTATION_FRAGMENTS = ["rotation", "drehung", "rotat"];
 
-/** Temporal interpolation mode: hold (step) — see Premiere scripting enum. */
-const INTERP_MODE_HOLD = 4;
 
 const PLUGIN_VERSION = "1.0.0";
 
@@ -205,7 +203,7 @@ const PLUGIN_VERSION = "1.0.0";
  * matched to the build that produced it — without this it was unclear whether
  * a report came from the current code or a stale installed copy.
  */
-const DIAGNOSTICS_VERSION = 8;
+const DIAGNOSTICS_VERSION = 9;
 
 /**
  * Collects host application info for diagnostics logs. Wrapped defensively
@@ -987,15 +985,22 @@ async function planParam(component, paramIndex, trackItem, sequence, timing, sou
      * range that actually matters. Only when the parameter has no keyframes at
      * all do we fall back to the clip's in/out points.
      */
-    let writeStart;
-    let writeEnd;
+    let clearStart;
+    let clearEnd;
     if (keyTimes.length > 0) {
-        writeStart = keyTimes[0];
-        writeEnd = keyTimes[keyTimes.length - 1];
+        clearStart = keyTimes[0];
+        clearEnd = keyTimes[keyTimes.length - 1];
     } else {
-        writeStart = await trackItem.getInPoint();
-        writeEnd = await trackItem.getOutPoint();
+        clearStart = await trackItem.getInPoint();
+        clearEnd = await trackItem.getOutPoint();
     }
+
+    /*
+     * The single keyframe sits at the reference time — the frame the user
+     * chose to keep. That is the whole point: everything else is discarded and
+     * this one value holds for the clip.
+     */
+    const writeStart = referenceTime;
 
     return {
         paramIndex: paramIndex,
@@ -1005,10 +1010,8 @@ async function planParam(component, paramIndex, trackItem, sequence, timing, sou
         value: value,
         referenceTime: referenceTime,
         writeStart: writeStart,
-        writeEnd: writeEnd,
-        // A single keyframe (or a zero-length range) means the second Hold key
-        // would land on the first — write only one in that case.
-        writeDistinctBounds: writeEnd.ticksNumber > writeStart.ticksNumber,
+        clearStart: clearStart,
+        clearEnd: clearEnd,
         keyframeCount: keyTimes.length
     };
 }
@@ -1189,6 +1192,18 @@ async function planClipValues(discovery, sequence, options, firstPass) {
         const isPositionCandidate = i < (discovery.positionIndexCount || 1);
         // Scale/Rotation are handled once, in the first pass only.
         if (!isPositionCandidate && !firstPass) continue;
+
+        /*
+         * A parameter already written in this run and sitting at its target
+         * state is settled. Without this check the default mode would see its
+         * own single keyframe as "animating" and rewrite it forever.
+         */
+        const alreadyWritten =
+            discovery.writtenTargets && discovery.writtenTargets[index];
+        if (alreadyWritten) {
+            const expectedCount = options.staticValue ? 0 : 1;
+            if (getKeyframeTimes(param).length === expectedCount) continue;
+        }
         const hasKeyframes = getKeyframeTimes(param).length > 0;
         if (isPositionCandidate && !hasKeyframes) {
             // At least one position candidate carries the movement: the others
@@ -1253,7 +1268,7 @@ function toNativeValue(value) {
  * @param {boolean} rawOptions.fixScale
  * @param {boolean} rawOptions.fixRotation
  * @param {boolean} rawOptions.dryRun
- * @param {boolean} rawOptions.keyframeMode
+ * @param {boolean} rawOptions.staticValue  no keyframes at all (opt-in)
  * @returns {Promise<Object>} report
  */
 async function runSmoothAutoFrame(rawOptions) {
@@ -1266,7 +1281,17 @@ async function runSmoothAutoFrame(rawOptions) {
         fixScale: !!(rawOptions && rawOptions.fixScale),
         fixRotation: !!(rawOptions && rawOptions.fixRotation),
         dryRun: !!(rawOptions && rawOptions.dryRun),
-        keyframeMode: !!(rawOptions && rawOptions.keyframeMode)
+        /*
+         * Default follows the manual workflow from the tutorial: delete all
+         * keyframes, then write exactly ONE keyframe holding the chosen value.
+         * Its author notes that "Premiere Pro wants to have at least one
+         * keyframe on this property" — and that matches what was measured
+         * here: with keyframing switched off entirely, Premiere re-transfers
+         * the generated path onto the parameter afterwards.
+         *
+         * staticValue is the opt-in alternative (no keyframes at all).
+         */
+        staticValue: !!(rawOptions && rawOptions.staticValue)
     };
 
     const report = {
@@ -1287,7 +1312,7 @@ async function runSmoothAutoFrame(rawOptions) {
                 fixScale: options.fixScale,
                 fixRotation: options.fixRotation,
                 dryRun: options.dryRun,
-                keyframeMode: options.keyframeMode
+                staticValue: options.staticValue
             },
             host: describeHost()
         },
@@ -1553,13 +1578,7 @@ async function runSmoothAutoFrame(rawOptions) {
      * Each pass therefore re-reads which parameters currently animate, freezes
      * exactly those, waits briefly for the effect to settle, and repeats.
      */
-    /*
-     * In keyframe mode the written parameters are SUPPOSED to end up with hold
-     * keyframes, so detecting them as "animating" and freezing them again
-     * would never terminate. That mode therefore runs a single pass and is
-     * verified against the expected keyframe count instead.
-     */
-    const MAX_PASSES = options.keyframeMode ? 1 : 5;
+    const MAX_PASSES = 5;
     const SETTLE_MS = 300;
 
     for (let pass = 0; pass < MAX_PASSES; pass++) {
@@ -1605,45 +1624,35 @@ async function runSmoothAutoFrame(rawOptions) {
 
                             const nativeValue = toNativeValue(target.value);
 
-                            if (options.keyframeMode) {
+                            if (!options.staticValue) {
+                                /*
+                                 * The tutorial's workflow: clear every
+                                 * keyframe, then write exactly ONE holding the
+                                 * chosen value. A single keyframe is constant
+                                 * by definition — there is nothing to
+                                 * interpolate towards — and it satisfies
+                                 * Premiere's apparent expectation that the
+                                 * property carries at least one keyframe.
+                                 * Writing two (as an earlier version did) adds
+                                 * no safety and deviates from the only
+                                 * variant known to work.
+                                 */
                                 compoundAction.addAction(
                                     param.createSetTimeVaryingAction(true)
                                 );
                                 compoundAction.addAction(
                                     param.createRemoveKeyframeRangeAction(
-                                        target.writeStart,
-                                        target.writeEnd,
+                                        target.clearStart,
+                                        target.clearEnd,
                                         true
                                     )
                                 );
 
-                                const startKeyframe = param.createKeyframe(nativeValue);
-                                startKeyframe.position = target.writeStart;
+                                const keyframe = param.createKeyframe(nativeValue);
+                                keyframe.position = target.writeStart;
                                 compoundAction.addAction(
-                                    param.createAddKeyframeAction(startKeyframe)
+                                    param.createAddKeyframeAction(keyframe)
                                 );
-                                compoundAction.addAction(
-                                    param.createSetInterpolationAtKeyframeAction(
-                                        target.writeStart,
-                                        INTERP_MODE_HOLD,
-                                        true
-                                    )
-                                );
-
-                                if (target.writeDistinctBounds) {
-                                    const endKeyframe = param.createKeyframe(nativeValue);
-                                    endKeyframe.position = target.writeEnd;
-                                    compoundAction.addAction(
-                                        param.createAddKeyframeAction(endKeyframe)
-                                    );
-                                    compoundAction.addAction(
-                                        param.createSetInterpolationAtKeyframeAction(
-                                            target.writeEnd,
-                                            INTERP_MODE_HOLD,
-                                            true
-                                        )
-                                    );
-                                }
                             } else {
                                 // Switch keyframing off and write one static
                                 // value — a parameter without keyframes is
@@ -1729,9 +1738,7 @@ async function runSmoothAutoFrame(rawOptions) {
                     const written =
                         plan.writtenTargets && plan.writtenTargets[index];
                     let expected = 0;
-                    if (options.keyframeMode && written) {
-                        expected = written.writeDistinctBounds ? 2 : 1;
-                    }
+                    if (!options.staticValue && written) expected = 1;
 
                     if (count !== expected) {
                         stillAnimating.push({
@@ -1794,9 +1801,9 @@ async function runSmoothAutoFrame(rawOptions) {
             clipName: plan.clipName,
             status: "ok",
             reason:
-                (options.keyframeMode
-                    ? "Auf Hold-Keyframes reduziert"
-                    : "Auf konstanten Wert fixiert") +
+                (options.staticValue
+                    ? "Auf konstanten Wert fixiert (keine Keyframes)"
+                    : "Auf einen einzelnen Keyframe reduziert") +
                 " und nachgeprüft: kein Positions-Parameter animiert mehr" +
                 (plan.passes > 1 ? " (" + plan.passes + " Durchläufe)" : "") +
                 ".",
