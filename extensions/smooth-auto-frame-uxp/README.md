@@ -6,8 +6,12 @@ die eigentlich von einem Stativ gefilmt wurden.
 
 Grundlage ist der Ablauf aus diesem Tutorial:
 [Pr Pro: Auto Reframe Sequence without Tracking](https://www.youtube.com/watch?v=Fq0ogPX4ZMk)
-von Mathias Möhl — Transkript und Algorithmus in
-[docs/tutorial-transcript.md](docs/tutorial-transcript.md).
+von Mathias Möhl (mamoworld). Der dort gezeigte Algorithmus pro Clip:
+
+1. Auto-Reframe-Effekt in den Effektoptionen öffnen
+2. „Erzeugten Pfad überschreiben" aktivieren
+3. Zum gewünschten Referenz-Frame navigieren
+4. Alle Keyframes löschen, dann **genau einen** mit dem dortigen Wert setzen
 
 **Erfordert Premiere Pro 25.6 oder neuer.** Ältere Versionen unterstützen UXP
 nicht und bräuchten eine CEP/ExtendScript-Umsetzung — die ist hier bewusst
@@ -68,10 +72,10 @@ In-/Out-Point des Clips als Fallback verwendet.
 | **Standard** | Alle Keyframes löschen, dann **genau einen** am gewählten Referenz-Frame setzen. |
 | **Konstanter Wert** (Checkbox) | Keyframing ganz abschalten, kein Keyframe. |
 
-Der Standard folgt dem Ablauf aus dem Tutorial (siehe
-[docs/tutorial-transcript.md](docs/tutorial-transcript.md)). Dessen Autor nennt
-den Grund ausdrücklich: Premiere erwartet auf dieser Property mindestens einen
-Keyframe. In Premiere 26.3.2 bestätigte sich das — ohne Keyframe überträgt
+Der Standard folgt dem Ablauf aus dem oben verlinkten Tutorial. Dessen Autor
+nennt den Grund ausdrücklich — Premiere erwarte auf dieser Property mindestens
+einen Keyframe („for whatever reason Premiere Pro wants to have at least one
+key frame on this property"). In Premiere 26.3.2 bestätigte sich das — ohne Keyframe überträgt
 Premiere den erzeugten Pfad erneut auf den Parameter und die Bewegung kehrt
 zurück. Ein einzelner Keyframe ist per Definition konstant; Hold-Interpolation
 oder ein zweiter Keyframe sind unnötig.
@@ -239,8 +243,6 @@ smooth-auto-frame-uxp/
 ├── style.css
 ├── src/
 │   └── core.js          # Kernalgorithmus (Phase 1 async / Phase 2 Transaktion)
-├── docs/
-│   └── tutorial-transcript.md  # Quelle des Algorithmus (Video-Transkript)
 ├── test/
 │   └── core.test.js     # 40 Regressionstests gegen gemockte Premiere-API
 ├── icons/
