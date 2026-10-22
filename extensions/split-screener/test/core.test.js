@@ -165,15 +165,100 @@ test("swap exchanges the two halves", async function () {
     });
 });
 
-test("Zoom is forced off so the cropped half is not rescaled", async function () {
+test("the nameless Zoom is found and forced off", async function () {
     setup();
+    // Zoom has no display name in Premiere 26.3.2, so the name lookup cannot
+    // find it — it has to be identified as the only boolean in the effect.
+    // Without that, Zoom is never written and would rescale the cropped half
+    // back to full frame if someone switched it on.
+    const clips = mock.makePair();
+    mock.selectClips(clips);
+
+    // Start from the state the self-repair is supposed to fix.
+    mock.state.cropOptions = {};
+    await core.createSplitScreen(COLUMNS);
+    const crop = ownPairOf(clips[0].chain).crop;
+    crop.getParam(4)._value = true;
+
+    const report = await core.createSplitScreen(COLUMNS);
+
+    assert.equal(report.fatalError, null, report.fatalError || "");
+    assert.equal(crop.getParam(4).current, false, "Zoom muss abgeschaltet werden");
+    assert.equal(crop.getParam(5).current, 0, "Weiche Kanten darf nicht angefasst werden");
+});
+
+test("a leftover half of an old split screen is reported", async function () {
+    setup();
+    // Delete our Transform by hand and the orphan Crop stays behind. A re-run
+    // inserts a fresh pair, so the image gets halved twice — and "remove"
+    // cannot clean the orphan up, because the detection needs both halves.
+    // The run cannot tell this apart from a crop the user applied on purpose,
+    // so it must at least say what it found.
+    const clips = mock.makeRealPair();
+    mock.selectClips(clips, { width: 1080, height: 1080 });
+    await core.createSplitScreen(COLUMNS);
+
+    for (const clip of clips) {
+        const at = clip.chain.matchNames().indexOf("AE.ADBE Geometry2");
+        clip.chain.components.splice(at, 1);
+    }
+
+    const report = await core.createSplitScreen(COLUMNS);
+
+    const warning = (report.results[0].changes || []).find(function (c) {
+        return c.param === "Achtung";
+    });
+    assert.ok(warning, "der übrig gebliebene Zuschneiden-Effekt muss gemeldet werden");
+    assert.match(warning.value, /AECrop/);
+});
+
+test("a crop the user applied is reported but not touched", async function () {
+    setup();
+    const foreign = new mock.MockComponent("AE.ADBE AECrop", "Zuschneiden", [
+        new mock.MockParam("Links", 10),
+        new mock.MockParam("Oben", 0),
+        new mock.MockParam("Rechts", 0),
+        new mock.MockParam("Unten", 0),
+        new mock.MockParam("", false),
+        new mock.MockParam("Weiche Kanten", 0)
+    ]);
+    const clips = mock.makePair({ lower: { effectsBefore: [foreign] } });
+    mock.selectClips(clips);
+
+    const report = await core.createSplitScreen(COLUMNS);
+
+    assert.equal(report.fatalError, null, report.fatalError || "");
+    assert.equal(foreign.getParam(0).current, 10, "fremder Beschnitt bleibt unverändert");
+    assert.equal(foreign.getParam(0).writeCount, 0);
+    const warning = (report.results[0].changes || []).find(function (c) {
+        return c.param === "Achtung";
+    });
+    assert.ok(warning, "auch der gewollte Fall wird gemeldet, weil er das Bild verändert");
+});
+
+test("a clean clip gets no warning", async function () {
+    setup();
+    mock.selectClips(mock.makeRealPair(), { width: 1080, height: 1080 });
+
+    const report = await core.createSplitScreen(COLUMNS);
+
+    assert.ok(
+        !(report.results[0].changes || []).some(function (c) {
+            return c.param === "Achtung";
+        })
+    );
+});
+
+test("the crop values go out as percentages", async function () {
+    setup();
+    // Measured in 26.3.2: writing 50 yields "50,0 %". No longer inferred from
+    // the Motion effect's scale convention.
     const clips = mock.makePair();
     mock.selectClips(clips);
 
     await core.createSplitScreen(COLUMNS);
 
-    const crop = ownPairOf(clips[0].chain).crop;
-    assert.equal(crop.param("Zoom").current, false);
+    assert.equal(cropValues(ownPairOf(clips[0].chain).crop).right, 50);
 });
 
 test("the first run is two transactions, in insert-then-write order", async function () {
@@ -874,15 +959,26 @@ test("an unusual resolution strategy shows up in the report", async function () 
 
 test("a clean run does not clutter the report with resolution info", async function () {
     setup();
-    mock.selectClips(mock.makePair());
+    // Everything resolvable by name: no fallback was needed, so no line.
+    // In the real host two parameters are nameless (Motion's uniform-scale
+    // checkbox and Crop's Zoom), which is why they show up there permanently.
+    mock.state.cropOptions = { zoomName: "Zoom" };
+    const clips = mock.makePair({
+        lower: { motion: { names: { uniform: "Gleichmäßig skalieren" } } },
+        upper: { motion: { names: { uniform: "Gleichmäßig skalieren" } } }
+    });
+    mock.selectClips(clips);
 
     const report = await core.createSplitScreen(COLUMNS);
 
     const changes = report.results[0].changes || [];
-    assert.ok(
-        !changes.some(function (c) {
-            return c.param === "Parameter-Auflösung";
-        })
+    const resolution = changes.find(function (c) {
+        return c.param === "Parameter-Auflösung";
+    });
+    assert.equal(
+        resolution,
+        undefined,
+        resolution ? "unerwartet: " + resolution.value : ""
     );
 });
 

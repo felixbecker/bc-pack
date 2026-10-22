@@ -201,6 +201,8 @@ durch einen Diagnose-Lauf bestätigt:
 | Chain-Reihenfolge | **gegenläufig zur Render-Reihenfolge** — höherer Index rendert früher |
 | Bewegung bei Auto Reframe | von Premiere **abgeschaltet**, Werte wirkungslos |
 | Koordinatenraum der Effekte | der **Quellclip** (hier 1920×1080), nicht die Sequenz (1080×1080) |
+| Prozentwerte beim Zuschneiden | 0‥100 (eine geschriebene 50 erscheint als „50,0 %") |
+| `Zoom` beim Zuschneiden | **namenlos**, wird strukturell erkannt |
 | „Gleichmäßig skalieren" | hat **keinen Namen** (ein Leerzeichen) und wird strukturell erkannt |
 
 Der Host bietet außerdem einen Fremdeffekt `AE.Impact_Crop_FX`, der ebenfalls
@@ -213,7 +215,7 @@ der Liste und wird nicht über die Fragmentsuche gefunden.
 | **Parameter haben keinen matchName** | Es gibt nur den lokalisierten `displayName` — in manchen Effekten ist er sogar leer. Jeder Parameter wird deshalb in bis zu vier Stufen aufgelöst: exakter Name in Prioritätsreihenfolge, Teilstring-Fragment, Positions-Fallback dort wo die Parameterreihenfolge stabil ist, und als letzte Instanz eine strukturelle Probe über die Wertform. Scheitert alles, wird der Clip abgelehnt — mit Nennung des Parameters und vollständigem Dump. |
 | Form der Rückgabewerte | `getValueAtTime` liefert je nach Version und Parametertyp einen nackten Wert, ein `{value: …}`-Paket, ein doppeltes Paket, ein zweielementiges Array oder numerische Strings. `src/values.js` normalisiert alle diese Formen; `getStartValue` wird zuerst versucht, dann die Zeit des Clips, dann Null. Schalter werden zusätzlich tolerant gelesen (`true`/`false` oder `1`/`0`), weil die älteren APIs Checkboxen numerisch geführt haben — eine strenge Boolean-Prüfung würde in so einem Host jeden Clip ablehnen. |
 | Einheit der Position (0‥1 oder Pixel) | am Transformieren-Parameter erkannt. Beim ersten Anwenden ist das der unveränderte Standardwert (Framemitte), die Erkennung läuft also auf unberührten Daten. Ein erneuter Lauf erbt die Interpretation des ersten. |
-| Skala der Prozentwerte (0‥1 oder 0‥100) | aus dem Bewegungs-Skalierungswert abgeleitet. Das ist eine **Annahme**: die Konvention eines anderen Effekts entscheidet über die Skala der Zuschneiden-Parameter. Falsch herum fällt es bei der Nachkontrolle auf (ein Wert von 50 in einem 0‥1-Parameter wird geklemmt und weicht ab). |
+| ~~Skala der Prozentwerte~~ | **Nicht mehr offen:** gemessen 0‥100, eine geschriebene 50 erscheint als „50,0 %". Früher aus dem Bewegungs-Skalierungswert abgeleitet, also die Konvention eines fremden Effekts als Beleg für diesen. Jetzt eine dokumentierte Konstante; weicht eine künftige Version ab, wird die 50 geklemmt und die Nachkontrolle meldet die Abweichung. |
 | Lage der intrinsischen Komponenten in der Kette | Einfügeindex wird aus der Kette berechnet; beide Anordnungen werden behandelt. Besteht die Kette nur aus Intrinsics, ist die Anordnung nicht unterscheidbar und es wird angehängt. |
 | Zeitbasis von `getValueAtTime` | der Clip-In-Punkt wird verwendet. Praktisch irrelevant, weil Keyframes auf den gelesenen Parametern ohnehin zum Abbruch führen, der Wert also zeitlich konstant ist. |
 

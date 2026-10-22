@@ -467,7 +467,11 @@ function makeCropComponent(options) {
         new MockParam(names[2], 0, opts.paramOptions || {}),
         new MockParam(names[3], 0, opts.paramOptions || {})
     ];
-    if (!opts.withoutZoom) params.push(new MockParam("Zoom", false));
+    if (!opts.withoutZoom) {
+        // Nameless in Premiere 26.3.2, with "Weiche Kanten" behind it.
+        params.push(new MockParam(opts.zoomName === undefined ? "" : opts.zoomName, false));
+        params.push(new MockParam("Weiche Kanten", 0));
+    }
     // Defaults to the name the real host uses, so the fixtures and the
     // resolved match name cannot drift apart.
     return new MockComponent(opts.matchName || "AE.ADBE AECrop", "Zuschneiden", params);

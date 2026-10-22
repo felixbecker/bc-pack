@@ -341,8 +341,10 @@ Pro Clip werden geschrieben, in dieser Reihenfolge:
    `createSetTimeVaryingAction(false)` unmittelbar voraus
 2. die vier Crop-Werte, jeder einzeln, und jeweils mit vorangestelltem
    `createSetTimeVaryingAction(false)`, falls dieser Parameter animiert ist
-3. `Zoom = false` am Zuschneiden, falls der Parameter existiert — Zoom würde
-   die geschnittene Hälfte wieder auf Framegröße ziehen
+3. `Zoom = false` am Zuschneiden — Zoom würde die geschnittene Hälfte wieder
+   auf Framegröße ziehen. Der Parameter ist in 26.3.2 **namenlos** und wird
+   daher wie die Skalierungs-Checkbox strukturell erkannt (der einzige echte
+   Boolean im Effekt)
 
 Das Entkeyframen ist nötig, weil `createSetValueAction` laut Doku für
 nicht-animierte Parameter spezifiziert ist; ein animierter Parameter würde den
@@ -614,6 +616,16 @@ vorhandenen Punch-In überschreiben und „Entfernen" wäre nicht mehr verlustfr
 Bleibt erhalten und wandert mit. Ein Zuschneiden macht die beschnittenen
 Bereiche transparent, ohne die Framegröße zu ändern, unsere Rechnung bleibt
 also gültig. Sichtbare Folge: die transparenten Stellen bleiben transparent.
+
+Weil solche Effekte **vor** unserem Paar rendern, meldet der Report sie als
+„Achtung"-Zeile mit matchName und Index. Das deckt zugleich einen Fall ab, der
+sonst still schiefgeht: löscht jemand von Hand nur eine Hälfte eines früheren
+Splitscreens, bleibt die andere als Waise liegen, der nächste Lauf fügt ein
+neues Paar ein, und das Bild wird zweimal halbiert — während der Report „ok"
+sagt. Aus der Kette allein sind der gewollte und der versehentliche Fall nicht
+zu unterscheiden, deshalb wird gemeldet und nicht entschieden. „Splitscreen
+entfernen" räumt eine solche Waise **nicht** mit auf, weil die Erkennung beide
+Hälften braucht — das muss von Hand passieren.
 
 ### Verschobene Bewegungs-Position
 

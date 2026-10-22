@@ -866,6 +866,12 @@ async function readClipRecord(trackItem, id, width, height, resolved) {
             resolved.transform,
             resolved.crop
         );
+        record.strays = chainUtil.findStrayOwnEffects(
+            record.infos,
+            resolved.transform,
+            resolved.crop,
+            record.ownPair
+        );
     }
 
     try {
@@ -935,21 +941,12 @@ async function readClipRecord(trackItem, id, width, height, resolved) {
             strategies: {}
         };
         record.descriptor.motionProblem = null;
-        try {
-            record.motionParams = await describeComponentParams(
-                motionComponent,
-                record.time
-            );
-        } catch {
-            record.motionParams = null;
-        }
         return record;
     }
 
     const motionResult = await readMotionState(motionComponent, record.time, width, height);
     record.descriptor.motion = motionResult.motion;
     record.descriptor.motionProblem = motionResult.problem;
-    record.motionParams = motionResult.params;
 
     return record;
 }
@@ -1041,10 +1038,20 @@ async function readPairValues(componentChain, ownPair, time, width, height) {
             if (isTimeVaryingSafe(resolvedParam.param)) keyframed.push(spec.key);
         }
 
-        // Crop's "Zoom" would rescale the cropped result. Optional: a build
-        // that does not expose it is fine, because a freshly created Crop has
-        // it switched off anyway.
-        const zoomIndex = findParamIndex(crop, C.CROP_ZOOM_NAMES, null, cropClaimed);
+        // Crop's "Zoom" would rescale the cropped result back to full frame.
+        // Nameless in Premiere 26.3.2 — the display name is an empty string —
+        // so it is resolved the same way as Motion's uniform-scale checkbox:
+        // the only parameter in the effect that reads as a genuine boolean.
+        // Optional: a build that does not expose it is fine, because a freshly
+        // created Crop has it switched off anyway.
+        let zoomIndex = findParamIndex(crop, C.CROP_ZOOM_NAMES, null, cropClaimed);
+        if (zoomIndex < 0) {
+            const probe = makeSingleBooleanParamFallback(time);
+            zoomIndex = await probe(crop, cropClaimed);
+            if (zoomIndex >= 0) strategies.zoom = "struktur";
+        } else {
+            strategies.zoom = "name";
+        }
 
         return {
             ok: true,
@@ -1145,22 +1152,31 @@ async function collectContext(mode, options) {
     };
 }
 
-/** Converts a placement into the units the host expects for writing. */
-function toWriteValues(placement, positionUnit, scaleConvention, width, height) {
+/**
+ * Converts a placement into the units the host expects for writing.
+ *
+ * Crop values go out as percentages. That used to be inferred from the Motion
+ * effect's scale value — one effect's convention deciding another's, which was
+ * a guess dressed up as a detection. Measured in Premiere 26.3.2: writing 50
+ * into the Crop effect yields "50,0 %" in Effect Controls, so the range is
+ * 0‥100. If a future version disagrees, writing 50 into a 0‥1 parameter gets
+ * clamped and the read-back comparison reports it — that guard is real, unlike
+ * the old heuristic.
+ */
+function toWriteValues(placement, positionUnit, width, height) {
     const position = geometry.fromPixelPosition(
         placement.transformPositionPixels,
         positionUnit,
         width,
         height
     );
-    const factor = scaleConvention === geometry.SCALE_CONVENTION.FRACTION ? 0.01 : 1;
     return {
         position: position,
         crop: {
-            left: geometry.round4(placement.crop.left * factor),
-            top: geometry.round4(placement.crop.top * factor),
-            right: geometry.round4(placement.crop.right * factor),
-            bottom: geometry.round4(placement.crop.bottom * factor)
+            left: geometry.round4(placement.crop.left),
+            top: geometry.round4(placement.crop.top),
+            right: geometry.round4(placement.crop.right),
+            bottom: geometry.round4(placement.crop.bottom)
         }
     };
 }
@@ -1190,6 +1206,32 @@ function describeChanges(placement) {
  * otherwise confirm itself. If a log says "struktur" where it should say
  * "name", the name lists need fixing.
  */
+/**
+ * Warns about additional Crop or Transform effects on the clip.
+ *
+ * They render before our pair and therefore change the result — either because
+ * the user applied them deliberately, which is supported, or because half of a
+ * previous split screen was deleted by hand and the other half stayed behind.
+ * The chain cannot tell those apart, so this reports instead of deciding; the
+ * stray would otherwise halve the image a second time while the run still said
+ * "ok".
+ */
+function describeStrays(record) {
+    if (!record.strays || !record.strays.length) return null;
+    const parts = [];
+    for (let i = 0; i < record.strays.length; i++) {
+        parts.push(record.strays[i].matchName + " @" + record.strays[i].index);
+    }
+    return {
+        param: "Achtung",
+        value:
+            "weitere Zuschneiden-/Transformieren-Effekte auf dem Clip (" +
+            parts.join(", ") +
+            ") — sie rendern vor dem Splitscreen und verändern das Ergebnis. " +
+            "Falls das ein Rest eines früheren Splitscreens ist, von Hand entfernen."
+    };
+}
+
 function describeResolution(current, motion) {
     const unusual = [];
 
@@ -1358,6 +1400,8 @@ async function createSplitScreen(rawOptions) {
             // and Crop parameters do not exist yet in the dry run.
             const resolution = describeResolution(null, entry.record.descriptor.motion);
             if (resolution) changes.push(resolution);
+            const stray = describeStrays(entry.record);
+            if (stray) changes.push(stray);
 
             report.results.push({
                 clipName: entry.record.descriptor.name,
@@ -1561,14 +1605,9 @@ async function createSplitScreen(rawOptions) {
     // ---- transaction 2: write the values ----
     for (let i = 0; i < writable.length; i++) {
         const entry = writable[i];
-        const scaleConvention =
-            (entry.record.descriptor.motion &&
-                entry.record.descriptor.motion.scaleConvention) ||
-            geometry.SCALE_CONVENTION.PERCENT;
         entry.write = toWriteValues(
             entry.placement,
             entry.current.positionUnit,
-            scaleConvention,
             width,
             height
         );
@@ -1761,6 +1800,8 @@ async function createSplitScreen(rawOptions) {
             entry.record.descriptor.motion
         );
         if (resolution) changes.push(resolution);
+        const stray = describeStrays(entry.record);
+        if (stray) changes.push(stray);
 
         if (problems.length) {
             report.errors++;

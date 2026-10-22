@@ -161,6 +161,41 @@ function findOwnPair(infos, transformMatchName, cropMatchName) {
     return null;
 }
 
+/**
+ * Components that carry one of OUR match names but are not part of the
+ * detected pair.
+ *
+ * Two ways to get here. Either the user applied a Crop or a Transform
+ * themselves — explicitly supported, those stay and move with the clip — or
+ * one half of a previous split screen survived while the other was deleted by
+ * hand. The second case is the dangerous one: the leftover Crop renders before
+ * our new pair and halves the image a second time, and because the pair
+ * detection needs both components it cannot be cleaned up by "remove" either.
+ *
+ * The two are indistinguishable from the chain alone, so this reports rather
+ * than decides.
+ *
+ * @returns {{index: number, matchName: string}[]}
+ */
+function findStrayOwnEffects(infos, transformMatchName, cropMatchName, ownPair) {
+    const result = [];
+    const paired = ownPair ? [ownPair.transformIndex, ownPair.cropIndex] : [];
+    const standard = standardComponents(infos);
+
+    for (let i = 0; i < standard.length; i++) {
+        const entry = standard[i];
+        if (paired.indexOf(entry.index) !== -1) continue;
+        if (
+            nameMatchesAny(entry.matchName, [transformMatchName]) ||
+            nameMatchesAny(entry.matchName, [cropMatchName])
+        ) {
+            result.push({ index: entry.index, matchName: entry.matchName });
+        }
+    }
+
+    return result;
+}
+
 /** Index of the intrinsic Motion component, or -1. */
 function findMotionIndex(infos) {
     if (!infos) return -1;
@@ -232,6 +267,7 @@ module.exports = {
     computeInsertionIndex,
     standardComponents,
     findOwnPair,
+    findStrayOwnEffects,
     findMotionIndex,
     hasAutoReframe,
     resolveMatchName
